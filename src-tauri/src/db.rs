@@ -163,6 +163,15 @@ const ADD_STORY_POINTS: &str = r#"
 ALTER TABLE tasks ADD COLUMN story_points INTEGER;
 "#;
 
+/// Tasks belong to a day, so the list can be walked back and forward through
+/// them. Existing tasks take the day they were made, read on the local clock —
+/// which day a task belongs to is a question about the developer's calendar,
+/// not about UTC.
+const ADD_PLANNED_FOR: &str = r#"
+ALTER TABLE tasks ADD COLUMN planned_for TEXT NOT NULL DEFAULT '';
+UPDATE tasks SET planned_for = date(created_at, 'unixepoch', 'localtime');
+"#;
+
 /// Migrations are applied in order; `user_version` records how many have run.
 const MIGRATIONS: &[&str] = &[
     SCHEMA,
@@ -171,6 +180,7 @@ const MIGRATIONS: &[&str] = &[
     ADD_THREAD_AGENT,
     ADD_CATEGORIES,
     ADD_STORY_POINTS,
+    ADD_PLANNED_FOR,
 ];
 
 fn migrate(conn: &Connection) -> Result<()> {
@@ -453,6 +463,7 @@ fn task_from_row(conn: &Connection, row: &Row) -> Result<Task> {
         position: row.get("position")?,
         estimate_minutes: row.get("estimate_minutes")?,
         story_points: row.get("story_points")?,
+        planned_for: row.get("planned_for")?,
         is_ai_generated: row.get::<_, i64>("is_ai_generated")? != 0,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -535,6 +546,26 @@ fn replace_dependencies(conn: &Connection, task_id: i64, depends_on: &[i64]) -> 
     Ok(())
 }
 
+/// Today on the developer's own clock, as `YYYY-MM-DD`.
+pub fn today(conn: &Connection) -> Result<String> {
+    Ok(conn.query_row("SELECT date('now', 'localtime')", [], |row| row.get(0))?)
+}
+
+/// A day to file a task under. Anything that is not a plain date falls back to
+/// today rather than being stored and later failing to match anything.
+fn planned_day(conn: &Connection, raw: Option<&str>) -> Result<String> {
+    let looks_like_a_date = |day: &str| {
+        day.len() == 10
+            && day.as_bytes()[4] == b'-'
+            && day.as_bytes()[7] == b'-'
+            && day.chars().filter(char::is_ascii_digit).count() == 8
+    };
+    match raw.map(str::trim).filter(|day| looks_like_a_date(day)) {
+        Some(day) => Ok(day.to_string()),
+        None => today(conn),
+    }
+}
+
 pub fn create_task(conn: &Connection, input: &NewTask) -> Result<Task> {
     let title = input.title.trim();
     if title.is_empty() {
@@ -549,8 +580,9 @@ pub fn create_task(conn: &Connection, input: &NewTask) -> Result<Task> {
     conn.execute(
         "INSERT INTO tasks
            (project_id, goal_id, title, description, category, status, position,
-            estimate_minutes, story_points, is_ai_generated, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
+            estimate_minutes, story_points, is_ai_generated, planned_for,
+            created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
         params![
             input.project_id,
             input.goal_id,
@@ -562,6 +594,7 @@ pub fn create_task(conn: &Connection, input: &NewTask) -> Result<Task> {
             input.estimate_minutes,
             input.story_points.and_then(nearest_story_points),
             input.is_ai_generated.unwrap_or(false) as i64,
+            planned_day(conn, input.planned_for.as_deref())?,
             ts,
         ],
     )?;
@@ -616,6 +649,12 @@ pub fn update_task(conn: &Connection, id: i64, patch: &TaskPatch) -> Result<Task
         conn.execute(
             "UPDATE tasks SET estimate_minutes = ?2 WHERE id = ?1",
             params![id, (estimate > 0).then_some(estimate)],
+        )?;
+    }
+    if let Some(day) = &patch.planned_for {
+        conn.execute(
+            "UPDATE tasks SET planned_for = ?2 WHERE id = ?1",
+            params![id, planned_day(conn, Some(day))?],
         )?;
     }
     if let Some(points) = patch.story_points {
@@ -925,6 +964,8 @@ pub fn create_tasks_from_plan(conn: &Connection, goal: &Goal) -> Result<Vec<Task
                 estimate_minutes: (planned.estimate_minutes > 0)
                     .then_some(planned.estimate_minutes),
                 story_points: (planned.story_points > 0).then_some(planned.story_points),
+                // An accepted plan is work for today; it can be moved after.
+                planned_for: None,
                 is_ai_generated: Some(true),
                 criteria: Some(planned.acceptance_criteria.clone()),
                 files: Some(planned.relevant_files.clone()),
@@ -1129,6 +1170,14 @@ pub fn get_settings(conn: &Connection) -> Result<Settings> {
     if let Some(raw) = read_setting(conn, "launch_at_login")? {
         settings.launch_at_login = raw == "1";
     }
+    if let Some(raw) = read_setting(conn, "focus_block_enabled")? {
+        settings.focus_block_enabled = raw == "1";
+    }
+    // An empty list is a real choice — blocking nothing — so it is stored as a
+    // written setting and only the absent key falls back to the defaults.
+    if let Some(raw) = read_setting(conn, "focus_block_sites")? {
+        settings.focus_block_sites = crate::block::parse_sites(&raw);
+    }
     if let Some(raw) = read_setting(conn, "onboarded")? {
         settings.onboarded = raw == "1";
     }
@@ -1136,6 +1185,7 @@ pub fn get_settings(conn: &Connection) -> Result<Settings> {
     settings.claude_path = read_setting(conn, "claude_path")?.filter(|v| !v.trim().is_empty());
     settings.claude_model = read_setting(conn, "claude_model")?.filter(|v| !v.trim().is_empty());
     settings.codex_model = read_setting(conn, "codex_model")?.filter(|v| !v.trim().is_empty());
+    settings.slack_connected = slack_token(conn)?.is_some();
     settings.active_project_id = match read_setting(conn, "active_project_id")? {
         Some(raw) => raw
             .parse::<i64>()
@@ -1144,6 +1194,12 @@ pub fn get_settings(conn: &Connection) -> Result<Settings> {
         None => None,
     };
     Ok(settings)
+}
+
+/// The Slack token, kept out of `Settings` so it is never serialised to the
+/// interface along with everything else.
+pub fn slack_token(conn: &Connection) -> Result<Option<String>> {
+    Ok(read_setting(conn, "slack_token")?.filter(|token| !token.trim().is_empty()))
 }
 
 pub fn update_settings(conn: &Connection, patch: &SettingsPatch) -> Result<Settings> {
@@ -1174,11 +1230,18 @@ pub fn update_settings(conn: &Connection, patch: &SettingsPatch) -> Result<Setti
     if let Some(on) = patch.onboarded {
         write_setting(conn, "onboarded", if on { "1" } else { "0" })?;
     }
+    if let Some(on) = patch.focus_block_enabled {
+        write_setting(conn, "focus_block_enabled", if on { "1" } else { "0" })?;
+    }
+    if let Some(raw) = &patch.focus_block_sites {
+        write_setting(conn, "focus_block_sites", &crate::block::parse_sites(raw).join("\n"))?;
+    }
     for (key, value) in [
         ("codex_path", &patch.codex_path),
         ("codex_model", &patch.codex_model),
         ("claude_path", &patch.claude_path),
         ("claude_model", &patch.claude_model),
+        ("slack_token", &patch.slack_token),
     ] {
         match value {
             Some(Some(text)) if !text.trim().is_empty() => {
@@ -1395,6 +1458,100 @@ mod tests {
         let titles: Vec<String> = history.into_iter().map(|task| task.title).collect();
         assert_eq!(titles, vec!["Yesterday"]);
         assert!(get_task(&conn, open.id).unwrap().completed_at.is_none());
+    }
+
+    #[test]
+    fn a_new_task_lands_on_today_unless_a_day_is_given() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let today = today(&conn).unwrap();
+        assert_eq!(a_task(&conn, project.id, "Now").planned_for, today);
+
+        let planned = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                title: "Tomorrow".into(),
+                planned_for: Some("2030-01-02".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(planned.planned_for, "2030-01-02");
+    }
+
+    #[test]
+    fn a_day_that_is_not_a_date_falls_back_rather_than_being_stored() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                title: "Whenever".into(),
+                planned_for: Some("next tuesday".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(task.planned_for, today(&conn).unwrap());
+    }
+
+    #[test]
+    fn a_task_can_be_moved_to_another_day() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = a_task(&conn, project.id, "Move me");
+        let moved = update_task(
+            &conn,
+            task.id,
+            &TaskPatch {
+                planned_for: Some("2030-03-04".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(moved.planned_for, "2030-03-04");
+    }
+
+    #[test]
+    fn tasks_from_before_the_upgrade_take_the_day_they_were_made() {
+        let before = MIGRATIONS
+            .iter()
+            .position(|migration| *migration == ADD_PLANNED_FOR)
+            .expect("the planned-for migration is in the list");
+        let conn = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..before] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO projects (path, name, is_git, created_at, last_opened_at)
+             VALUES ('/tmp/old', 'old', 1, 1, 1)",
+            [],
+        )
+        .unwrap();
+        // Made at noon UTC on a known day.
+        conn.execute(
+            "INSERT INTO tasks (project_id, title, created_at, updated_at)
+             VALUES (1, 'Older', 1755000000, 1755000000)",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", before as i64).unwrap();
+
+        migrate(&conn).unwrap();
+
+        let day: String = conn
+            .query_row("SELECT planned_for FROM tasks WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
+        let expected: String = conn
+            .query_row(
+                "SELECT date(1755000000, 'unixepoch', 'localtime')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(day, expected);
     }
 
     #[test]

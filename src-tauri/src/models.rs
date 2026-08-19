@@ -165,6 +165,8 @@ pub struct Task {
     pub estimate_minutes: Option<i64>,
     /// Relative size on the Fibonacci scale, when one has been estimated.
     pub story_points: Option<i64>,
+    /// The day this task sits on, as `YYYY-MM-DD` on the local clock.
+    pub planned_for: String,
     pub is_ai_generated: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -188,6 +190,7 @@ pub struct NewTask {
     pub status: Option<TaskStatus>,
     pub estimate_minutes: Option<i64>,
     pub story_points: Option<i64>,
+    pub planned_for: Option<String>,
     pub goal_id: Option<i64>,
     pub is_ai_generated: Option<bool>,
     pub criteria: Option<Vec<String>>,
@@ -217,6 +220,7 @@ pub struct TaskPatch {
     pub status: Option<TaskStatus>,
     pub estimate_minutes: Option<i64>,
     pub story_points: Option<i64>,
+    pub planned_for: Option<String>,
     pub criteria: Option<Vec<String>>,
     pub files: Option<Vec<String>>,
     pub depends_on: Option<Vec<i64>>,
@@ -278,6 +282,9 @@ pub struct Settings {
     pub codex_model: Option<String>,
     pub claude_path: Option<String>,
     pub claude_model: Option<String>,
+    /// True once a Slack token has been saved. The token itself is never sent
+    /// to the interface — only whether there is one.
+    pub slack_connected: bool,
     /// Which palette the interface uses.
     pub theme: Theme,
     /// Announce the moments that happen while you are looking elsewhere.
@@ -285,6 +292,10 @@ pub struct Settings {
     /// Sound the alarm when a session runs out or a task is finished.
     pub sounds: bool,
     pub launch_at_login: bool,
+    /// Send blocked sites to a holding page while a session is running.
+    pub focus_block_enabled: bool,
+    /// The sites that are shut while a session runs, as bare hosts.
+    pub focus_block_sites: Vec<String>,
     /// False until the first run has been walked through.
     pub onboarded: bool,
 }
@@ -301,10 +312,16 @@ impl Default for Settings {
             codex_model: None,
             claude_path: None,
             claude_model: None,
+            slack_connected: false,
             theme: Theme::Light,
             notifications: true,
             sounds: true,
             launch_at_login: false,
+            focus_block_enabled: false,
+            focus_block_sites: crate::block::DEFAULT_SITES
+                .iter()
+                .map(|site| site.to_string())
+                .collect(),
             onboarded: false,
         }
     }
@@ -322,9 +339,13 @@ pub struct SettingsPatch {
     pub codex_model: Option<Option<String>>,
     pub claude_path: Option<Option<String>>,
     pub claude_model: Option<Option<String>>,
+    pub slack_token: Option<Option<String>>,
     pub theme: Option<Theme>,
     pub notifications: Option<bool>,
     pub sounds: Option<bool>,
     pub launch_at_login: Option<bool>,
+    pub focus_block_enabled: Option<bool>,
+    /// Taken as written and read leniently — the list is typed by hand.
+    pub focus_block_sites: Option<String>,
     pub onboarded: Option<bool>,
 }

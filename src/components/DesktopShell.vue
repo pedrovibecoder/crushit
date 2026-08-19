@@ -28,6 +28,7 @@ const NAV: Array<{ id: View; label: string; icon: string }> = [
   { id: "goal", label: "Goal", icon: "sparkle" },
   { id: "changes", label: "Changes", icon: "branch" },
   { id: "history", label: "History", icon: "calendar" },
+  { id: "slack", label: "Slack", icon: "message" },
   { id: "settings", label: "Settings", icon: "gear" },
 ];
 

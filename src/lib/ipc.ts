@@ -18,9 +18,12 @@ import type {
   Project,
   ProjectInspection,
   RestSnapshot,
+  BlockPermission,
   Settings,
   SettingsPatch,
+  WaitingConversation,
   ShortcutInfo,
+  SlackAccount,
   Task,
   TaskPatch,
 } from "../types";
@@ -84,6 +87,16 @@ export const ipc = {
   getSettings: () => invoke<Settings>("get_settings"),
   updateSettings: (patch: SettingsPatch) =>
     invoke<Settings>("update_settings", { patch }),
+  checkFocusBlock: () => invoke<BlockPermission>("check_focus_block"),
+
+  connectSlack: (token: string | null) =>
+    invoke<SlackAccount | null>("connect_slack", { token }),
+  slackAccount: () => invoke<SlackAccount | null>("slack_account"),
+  slackWaiting: () => invoke<WaitingConversation[]>("slack_waiting"),
+  draftSlackReply: (conversationId: string) =>
+    invoke<string>("draft_slack_reply", { conversationId }),
+  sendSlackReply: (conversationId: string, text: string) =>
+    invoke<void>("send_slack_reply", { conversationId, text }),
 
   agentStatus: (agent: Agent, force = false) =>
     invoke<AgentStatus>("agent_status", { agent, force }),

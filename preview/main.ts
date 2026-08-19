@@ -63,6 +63,46 @@ if (params.get("open") === "model") {
   }, 400);
 }
 
+// `?press=Settings` clicks the button with that title, which is how a screen
+// reached by a button rather than by `?view=` gets opened for review.
+if (params.get("press")) {
+  setTimeout(() => {
+    const wanted = params.get("press")!;
+    const button = [...document.querySelectorAll("button")].find(
+      (element) => element.title === wanted || element.getAttribute("aria-label") === wanted,
+    );
+    button?.click();
+  }, 500);
+}
+
+// `?reveal=Distractions` scrolls a section of a long screen into view, so a
+// part that is normally below the fold can be reviewed.
+if (params.get("reveal")) {
+  setTimeout(() => {
+    const wanted = params.get("reveal")!.toLowerCase();
+    const heading = [...document.querySelectorAll("h2, h1, p")].find((element) =>
+      element.textContent?.trim().toLowerCase().startsWith(wanted),
+    );
+    heading?.scrollIntoView({ block: "start" });
+    // After `?view=`, which swaps the screen half a second in.
+  }, 900);
+}
+
+// `?panel=calendar` or `?panel=project` opens one of Today's header panels.
+const PANELS: Record<string, string> = {
+  calendar: "Pick a day",
+  project: "Switch project",
+};
+if (PANELS[params.get("panel") ?? ""]) {
+  setTimeout(() => {
+    const title = PANELS[params.get("panel") ?? ""];
+    const button = [...document.querySelectorAll("button")].find(
+      (element) => element.title === title,
+    );
+    button?.click();
+  }, 340);
+}
+
 // `?compose=1` opens the inline add-task form for review.
 if (params.get("compose")) {
   setTimeout(() => {
@@ -108,5 +148,76 @@ if (params.get("confirm") === "delete") {
       if (button) { button.click(); break; }
       await tick();
     }
+    // `?confirm=delete&go=1` follows through, to watch the row leave.
+    if (params.get("go")) {
+      for (let i = 0; i < 300; i += 1) {
+        const button = [...document.querySelectorAll("button")].find(
+          (element) => element.textContent?.trim() === "Delete",
+        );
+        if (button) { button.click(); break; }
+        await tick();
+      }
+    }
   })();
+}
+
+// `?rowexit=<ms>` puts the delete animation on a row and holds it at that
+// moment, without deleting anything — the animation on its own.
+if (params.get("rowexit")) {
+  setTimeout(() => {
+    const style = document.createElement("style");
+    style.textContent = `.row-deleting { animation-play-state: paused !important; animation-delay: -${params.get("rowexit")}ms !important; }`;
+    document.head.appendChild(style);
+    document.querySelector('div[role="button"]')?.classList.add("row-deleting");
+  }, 500);
+}
+
+// `?slackview=list|reply` opens the Slack screen, and the first conversation
+// with a drafted reply in it.
+if (params.get("slackview")) {
+  setTimeout(async () => {
+    const { useSlackStore } = await import("../src/stores/slack");
+    const store = useAppStore();
+    const slack = useSlackStore();
+    store.view = "slack";
+    await slack.refreshAccount();
+    await slack.load();
+    if (params.get("slackview") === "reply") {
+      slack.openConversation("D1");
+      await slack.writeDraft();
+    }
+  }, 900);
+}
+
+// `?day=-1` steps the day back, for reviewing what carries over.
+if (params.get("day")) {
+  const steps = Number(params.get("day"));
+  const label = steps < 0 ? "Previous day" : "Next day";
+  const tick = () => new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+  void (async () => {
+    for (let i = 0; i < Math.abs(steps); i += 1) {
+      for (let attempt = 0; attempt < 300; attempt += 1) {
+        const button = [...document.querySelectorAll("button")].find(
+          (element) => element.getAttribute("aria-label") === label,
+        );
+        if (button) { button.click(); break; }
+        await tick();
+      }
+      await tick();
+    }
+  })();
+}
+
+// `?settings=<section>` opens Settings and scrolls a section into view.
+if (params.get("settings")) {
+  setTimeout(() => {
+    useAppStore().view = "settings";
+    const wanted = params.get("settings")?.toLowerCase();
+    setTimeout(() => {
+      const heading = [...document.querySelectorAll("h2")].find(
+        (element) => element.textContent?.trim().toLowerCase() === wanted,
+      );
+      heading?.scrollIntoView({ block: "start" });
+    }, 120);
+  }, 900);
 }

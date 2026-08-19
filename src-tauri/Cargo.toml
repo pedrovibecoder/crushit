@@ -23,6 +23,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 thiserror = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
+ureq = { version = "3.4.0", features = ["json"] }
 
 [profile.release]
 codegen-units = 1

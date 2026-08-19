@@ -9,5 +9,12 @@
     -->
     <key>LSUIElement</key>
     <true/>
+    <!--
+      Shown in the system prompt the first time a focus session asks a browser
+      what it is showing. Without this key macOS kills the app rather than
+      asking, so the sentence is not optional.
+    -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Crushit asks your browser which site a tab is on, so it can hold blocked sites shut while a focus session is running.</string>
 </dict>
 </plist>

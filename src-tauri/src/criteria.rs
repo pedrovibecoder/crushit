@@ -138,6 +138,7 @@ mod tests {
             description: Some("Let a customer set a new password by email.".into()),
             category: "task".into(),
             story_points: Some(3),
+            planned_for: "2026-08-19".into(),
             status: TaskStatus::Ready,
             position: 0,
             estimate_minutes: Some(45),

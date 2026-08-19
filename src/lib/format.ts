@@ -37,3 +37,35 @@ export function shortenPath(path: string, home = "/Users"): string {
   }
   return path;
 }
+
+/** Today on the local clock, as `YYYY-MM-DD` — the form tasks are filed under. */
+export function localDay(date = new Date()): string {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
+/** The same day, moved by a number of days. */
+export function shiftDay(day: string, by: number): string {
+  const date = new Date(`${day}T12:00:00`);
+  date.setDate(date.getDate() + by);
+  return localDay(date);
+}
+
+/**
+ * How a person would name the day: `Today`, `Yesterday`, `Tomorrow`, and a
+ * date for anything further out.
+ */
+export function dayName(day: string, today = localDay()): string {
+  const days = Math.round(
+    (new Date(`${day}T12:00:00`).getTime() - new Date(`${today}T12:00:00`).getTime()) / 86_400_000,
+  );
+  if (days === 0) return "Today";
+  if (days === -1) return "Yesterday";
+  if (days === 1) return "Tomorrow";
+  return new Date(`${day}T12:00:00`).toLocaleDateString(undefined, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+  });
+}

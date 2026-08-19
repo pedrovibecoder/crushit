@@ -19,6 +19,7 @@ export type View =
   | "settings"
   | "changes"
   | "history"
+  | "slack"
   | "onboarding";
 
 const DEFAULT_SETTINGS: Settings = {
@@ -31,10 +32,13 @@ const DEFAULT_SETTINGS: Settings = {
   codexModel: null,
   claudePath: null,
   claudeModel: null,
+  slackConnected: false,
   theme: "light",
   notifications: true,
   sounds: true,
   launchAtLogin: false,
+  focusBlockEnabled: false,
+  focusBlockSites: ["instagram.com", "facebook.com", "x.com", "twitter.com", "tiktok.com"],
   onboarded: false,
 };
 

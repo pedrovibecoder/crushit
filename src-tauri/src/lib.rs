@@ -1,5 +1,6 @@
 pub mod agent;
 mod analysis;
+pub mod block;
 pub mod claude;
 pub mod codex;
 mod commands;
@@ -19,6 +20,7 @@ pub mod run;
 pub mod verify;
 pub mod repo;
 mod shortcut;
+pub mod slack;
 mod sound;
 mod tray;
 
@@ -102,6 +104,7 @@ pub fn run() {
             commands::performance_stats,
             commands::get_settings,
             commands::update_settings,
+            commands::check_focus_block,
             commands::hide_popup,
             commands::open_desktop_window,
             commands::hide_desktop_window,
@@ -109,6 +112,11 @@ pub fn run() {
             commands::resize_popup,
             commands::quit_app,
             commands::popup_shortcut,
+            commands::connect_slack,
+            commands::slack_account,
+            commands::slack_waiting,
+            commands::draft_slack_reply,
+            commands::send_slack_reply,
             commands::agent_status,
             commands::agent_models,
             commands::latest_goal,
@@ -154,6 +162,7 @@ pub fn run() {
             app.manage(agent::StatusCache::default());
             app.manage(ExecutionState::default());
             app.manage(VerificationState::default());
+            app.manage(block::BlockState::default());
 
             build_tray(app.handle())?;
             shortcut::register(app.handle());
@@ -413,6 +422,10 @@ fn spawn_timer_thread(app: AppHandle) {
             if snapshot.status == FocusStatus::Idle {
                 finished_at = None;
             }
+
+            // Sites are shut only while the clock is actually running; the
+            // sweep paces itself, so calling it every tick is not a cost.
+            block::sweep(&app, &snapshot);
 
             if last_persist.elapsed() >= PERSIST_EVERY {
                 persist_progress(&app, &snapshot);

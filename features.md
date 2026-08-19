@@ -13,6 +13,10 @@ built-in coding agent (Codex or Claude Code).
 - Task dependencies — a task can wait on another, and shows as **Blocked** until it clears
 - Statuses: backlog, ready, in progress, needs review, completed, blocked
 - Filters: All / Open / Done
+- **Move between days** with arrows in the header, and a Today button to jump back
+- Unfinished work **carries over** — it stays on every later day until it's done, marked "Carried over"
+- A task added while reading another day is planned for that day
+- Progress, story points and the bar all count the day you're looking at
 - Mark complete with a confirmation step
 - Delete with a confirmation step
 - Completion celebration with confetti and a chime
@@ -107,6 +111,19 @@ built-in coding agent (Codex or Claude Code).
 - Overall recommendation
 - Read-only — never modifies anything, never marks the task complete itself
 
+## Slack
+
+- Connect a Slack workspace with a user token
+- **Waiting on you** — direct messages whose last word isn't yours, longest wait first
+- Read the conversation inside Crushit
+- **Draft a reply** — the agent writes an answer from your task list and your repository
+- Edit the draft, then send it yourself with **Send as me**
+- Posts from your own account, under your own name
+- Nothing is ever sent automatically — the send button is the only path to Slack
+- The token is stored in the backend and never reaches the interface
+- Drafting is read-only and is told not to promise dates or commit to work on your behalf
+- A banner on Today shows how many messages are waiting
+
 ## Git review
 
 - Changed files in the repository with their state (added, modified, deleted, renamed, untracked)
@@ -161,5 +178,6 @@ built-in coding agent (Codex or Claude Code).
 
 - Everything stored locally in a single SQLite file
 - No account, no sign-up, no telemetry
+- The only outbound network calls are to Slack, and only once you connect it
 - Agent credentials never read
 - Database migrated forward on upgrade, never rebuilt

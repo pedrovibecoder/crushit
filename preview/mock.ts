@@ -1,5 +1,15 @@
 // Stand-in for the Tauri runtime so the UI can be rendered in a browser for
 // visual review. Preview-only: never imported by the app itself.
+const DAY_MS = 86400000;
+const asDay = (offset: number) => {
+  const date = new Date(Date.now() + offset * DAY_MS);
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+};
+const TODAY = asDay(0);
+const YESTERDAY = asDay(-1);
+
 const PROJECT = {
   id: 1,
   path: "/Users/dev/projects/my-app",
@@ -22,6 +32,7 @@ const TASKS = [
     position: 0,
     estimateMinutes: 45,
     storyPoints: 5,
+    plannedFor: TODAY,
     isAiGenerated: true,
     createdAt: 0,
     updatedAt: 0,
@@ -49,6 +60,7 @@ const TASKS = [
     position: 1,
     estimateMinutes: 30,
     storyPoints: 3,
+    plannedFor: TODAY,
     isAiGenerated: true,
     createdAt: 0,
     updatedAt: 0,
@@ -70,6 +82,7 @@ const TASKS = [
     position: 2,
     estimateMinutes: 20,
     storyPoints: 2,
+    plannedFor: YESTERDAY,
     isAiGenerated: true,
     createdAt: 0,
     updatedAt: 0,
@@ -91,6 +104,7 @@ const TASKS = [
     position: 3,
     estimateMinutes: 25,
     storyPoints: 3,
+    plannedFor: TODAY,
     isAiGenerated: true,
     createdAt: 0,
     updatedAt: 0,
@@ -112,6 +126,7 @@ const TASKS = [
     position: 4,
     estimateMinutes: null,
     storyPoints: 1,
+    plannedFor: YESTERDAY,
     isAiGenerated: false,
     createdAt: 0,
     updatedAt: 0,
@@ -179,9 +194,12 @@ const SETTINGS = {
   claudePath: null,
   claudeModel: null,
   theme: new URLSearchParams(location.search).get("theme") ?? "light",
+  slackConnected: new URLSearchParams(location.search).get("slack") !== null,
   notifications: true,
   sounds: true,
   launchAtLogin: false,
+  focusBlockEnabled: new URLSearchParams(location.search).get("block") !== null,
+  focusBlockSites: ["instagram.com", "facebook.com", "x.com", "twitter.com", "tiktok.com"],
   onboarded: new URLSearchParams(location.search).get("view") !== "onboarding",
 };
 
@@ -404,7 +422,7 @@ const DIFF = `--- a/src/permissions/keys.ts
 +  },
  };`;
 
-export async function invoke(command: string): Promise<unknown> {
+export async function invoke(command: string, args?: unknown): Promise<unknown> {
   switch (command) {
     case "bootstrap":
       return {
@@ -437,10 +455,46 @@ export async function invoke(command: string): Promise<unknown> {
       return HISTORY;
     case "get_settings":
       return SETTINGS;
+    // Enough of a write to review the screens that toggle something.
+    case "update_settings":
+      Object.assign(SETTINGS, (args as { patch?: Record<string, unknown> })?.patch ?? {});
+      return SETTINGS;
+    case "check_focus_block":
+      return new URLSearchParams(location.search).get("blockPermission") ?? "granted";
     case "focus_snapshot":
       return FOCUS;
     case "rest_snapshot":
       return REST;
+    case "slack_account":
+      return { userId: "U1", user: "cleonart", team: "Maverick" };
+    case "slack_waiting":
+      return [
+        {
+          id: "D1",
+          with: "Priya",
+          waitingSeconds: 2400,
+          messages: [
+            { user: "U2", author: "Priya", text: "morning! quick one", ts: "1.0", isMine: false },
+            {
+              user: "U2",
+              author: "Priya",
+              text: "is the invoice PDF download done, or still in progress? asking for the release notes",
+              ts: "2.0",
+              isMine: false,
+            },
+          ],
+        },
+        {
+          id: "D2",
+          with: "Tom",
+          waitingSeconds: 480,
+          messages: [
+            { user: "U3", author: "Tom", text: "can you take a look at the i18n task today?", ts: "3.0", isMine: false },
+          ],
+        },
+      ];
+    case "draft_slack_reply":
+      return "Not quite — the PDF service is done and the download endpoint is in progress. Ownership check and the button are still open, so I would not put it in the release notes yet.";
     case "agent_status":
       return AGENT_STATUS;
     case "agent_models":
@@ -519,6 +573,10 @@ export function getCurrentWindow() {
 
 export async function open(): Promise<string | null> {
   return null;
+}
+
+export async function openUrl(url: string) {
+  console.info("preview: would open", url);
 }
 
 export async function revealItemInDir(): Promise<void> {}

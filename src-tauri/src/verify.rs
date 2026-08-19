@@ -306,6 +306,7 @@ mod tests {
             description: None,
             category: "task".into(),
             story_points: Some(3),
+            planned_for: "2026-08-19".into(),
             status: TaskStatus::NeedsReview,
             position: 0,
             estimate_minutes: None,

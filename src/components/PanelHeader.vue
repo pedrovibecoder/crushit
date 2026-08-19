@@ -26,13 +26,17 @@ const emit = defineEmits<{ (event: "back"): void }>();
       <AppIcon name="back" :size="14" />
     </button>
     <div class="min-w-0 flex-1">
-      <p
-        v-if="eyebrow"
-        class="truncate text-[11px] leading-tight font-semibold"
-        :class="accent ? 'text-accent' : 'text-ink-2'"
-      >
-        {{ eyebrow }}
-      </p>
+      <!-- Slotted so a screen can hang a control off the line above the title
+           — switching project, on Today — without restyling it. -->
+      <slot name="eyebrow">
+        <p
+          v-if="eyebrow"
+          class="truncate text-[11px] leading-tight font-semibold"
+          :class="accent ? 'text-accent' : 'text-ink-2'"
+        >
+          {{ eyebrow }}
+        </p>
+      </slot>
       <!-- Slotted so a screen can swap the heading for an editable field
            without losing the type scale. -->
       <slot name="title">

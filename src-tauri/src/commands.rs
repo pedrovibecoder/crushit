@@ -513,6 +513,14 @@ pub fn update_settings(
     db::update_settings(&db.conn(), &patch)
 }
 
+/// Asks the browsers one harmless question, to find out whether macOS is
+/// letting the app talk to them at all. The settings screen offers this
+/// because "it is not blocking anything" has two very different causes.
+#[tauri::command]
+pub fn check_focus_block() -> crate::block::Permission {
+    crate::block::probe()
+}
+
 /// Registers or removes the login item. Reported back through the settings
 /// read, so a refusal by the system shows up rather than being assumed.
 pub fn apply_autostart(app: &AppHandle, wanted: bool) {
@@ -587,6 +595,151 @@ pub fn popup_shortcut(state: State<'_, crate::shortcut::ShortcutState>) -> crate
 #[tauri::command]
 pub fn quit_app(app: AppHandle) {
     app.exit(0);
+}
+
+// -------------------------------------------------------------------- slack
+
+fn slack_token(db: &Db) -> Result<String> {
+    db::slack_token(&db.conn())?
+        .ok_or_else(|| Error::invalid("Connect Slack in Settings first."))
+}
+
+/// Checks a token and remembers it. Passing nothing disconnects.
+#[tauri::command]
+pub async fn connect_slack(
+    app: AppHandle,
+    db: State<'_, Db>,
+    token: Option<String>,
+) -> Result<Option<crate::slack::SlackAccount>> {
+    let token = token.map(|token| token.trim().to_string()).filter(|t| !t.is_empty());
+    let Some(token) = token else {
+        db::update_settings(
+            &db.conn(),
+            &SettingsPatch {
+                slack_token: Some(None),
+                ..Default::default()
+            },
+        )?;
+        let _ = app.emit("slack:changed", ());
+        return Ok(None);
+    };
+
+    // Proved to work before it is stored, so a bad paste is caught here rather
+    // than turning into a screen that silently never has anything on it.
+    let account = crate::slack::account(&token)?;
+    db::update_settings(
+        &db.conn(),
+        &SettingsPatch {
+            slack_token: Some(Some(token)),
+            ..Default::default()
+        },
+    )?;
+    let _ = app.emit("slack:changed", ());
+    Ok(Some(account))
+}
+
+#[tauri::command]
+pub async fn slack_account(db: State<'_, Db>) -> Result<Option<crate::slack::SlackAccount>> {
+    match db::slack_token(&db.conn())? {
+        Some(token) => crate::slack::account(&token).map(Some),
+        None => Ok(None),
+    }
+}
+
+/// The direct messages whose last word is not yours.
+#[tauri::command]
+pub async fn slack_waiting(db: State<'_, Db>) -> Result<Vec<crate::slack::WaitingConversation>> {
+    let token = slack_token(&db)?;
+    let me = crate::slack::account(&token)?.user_id;
+    crate::slack::waiting(&token, &me)
+}
+
+/// Asks the agent for a reply. Drafting only — nothing is sent from here.
+#[tauri::command]
+pub async fn draft_slack_reply(
+    app: AppHandle,
+    db: State<'_, Db>,
+    cache: State<'_, agent::StatusCache>,
+    conversation_id: String,
+) -> Result<String> {
+    let token = slack_token(&db)?;
+    let me = crate::slack::account(&token)?.user_id;
+    let messages = crate::slack::history(&token, &conversation_id, &me)?;
+    if messages.is_empty() {
+        return Err(Error::invalid("there is nothing to reply to yet"));
+    }
+    let with = crate::slack::waiting(&token, &me)?
+        .into_iter()
+        .find(|conversation| conversation.id == conversation_id)
+        .map(|conversation| conversation.with)
+        .unwrap_or_else(|| "them".to_string());
+    let conversation = crate::slack::WaitingConversation {
+        id: conversation_id,
+        with,
+        messages,
+        waiting_seconds: 0,
+    };
+
+    let (project, chosen, model, tasks) = {
+        let conn = db.conn();
+        let settings = db::get_settings(&conn)?;
+        let project = match settings.active_project_id {
+            Some(id) => db::find_project(&conn, id)?,
+            None => None,
+        }
+        .ok_or_else(|| Error::invalid("choose a project first — the reply is drawn from it"))?;
+        let tasks = db::list_tasks(&conn, project.id)?;
+        (
+            project,
+            settings.agent,
+            configured_model(&settings, settings.agent),
+            tasks,
+        )
+    };
+    let binary = agent_binary(&db, &cache, chosen)?;
+    let prompt = crate::slack::draft_prompt(&conversation, &tasks);
+
+    let answer = match chosen {
+        Agent::Codex => {
+            let client = app.state::<CodexClient>();
+            client.ensure_started(&binary, &app.package_info().version.to_string())?;
+            crate::codex::planning::run_read_only_turn(
+                &client,
+                &project.path,
+                &prompt,
+                crate::slack::draft_schema(),
+                model.as_deref(),
+                |_| {},
+                || false,
+                "Codex took too long to draft a reply.",
+            )
+        }
+        Agent::ClaudeCode => crate::claude::planning::run_read_only(
+            &binary,
+            &project.path,
+            &format!("{prompt}{}", crate::slack::draft_instruction()),
+            model.as_deref(),
+            |_| {},
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            "Claude Code took too long to draft a reply.",
+        ),
+    };
+
+    crate::slack::parse_draft(&answer?.0)
+}
+
+/// Sends a reply to Slack. Reached only by pressing Send.
+#[tauri::command]
+pub async fn send_slack_reply(
+    app: AppHandle,
+    db: State<'_, Db>,
+    conversation_id: String,
+    text: String,
+) -> Result<()> {
+    let token = slack_token(&db)?;
+    crate::slack::send(&token, &conversation_id, &text)?;
+    let _ = app.emit("slack:changed", ());
+    Ok(())
 }
 
 // -------------------------------------------------------------------- agent

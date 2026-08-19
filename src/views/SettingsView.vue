@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { computed, onMounted, ref, watch } from "vue";
 import AppIcon from "../components/AppIcon.vue";
 import PanelHeader from "../components/PanelHeader.vue";
@@ -11,6 +11,7 @@ import { shortenPath } from "../lib/format";
 import { useAgentStore } from "../stores/agent";
 import { useAppStore } from "../stores/app";
 import { useCategoriesStore } from "../stores/categories";
+import { useSlackStore } from "../stores/slack";
 import {
   AGENTS,
   AGENT_LABELS,
@@ -18,6 +19,7 @@ import {
   THEMES,
   THEME_LABELS,
   type Agent,
+  type BlockPermission,
   type ShortcutInfo,
   type Theme,
 } from "../types";
@@ -25,8 +27,45 @@ import {
 const app = useAppStore();
 const agents = useAgentStore();
 const categories = useCategoriesStore();
+const slack = useSlackStore();
 
 const FOCUS_PRESETS = [15, 25, 45, 60];
+
+/**
+ * The blocklist is edited as text rather than as rows: it is a list of
+ * domains, and typing one per line is faster than any control that could be
+ * built around it. It is written back on blur, so a half-typed domain is
+ * never saved out from under the cursor.
+ */
+const sitesDraft = ref("");
+const blockPermission = ref<BlockPermission | null>(null);
+const checkingBlock = ref(false);
+
+watch(
+  () => app.settings.focusBlockSites,
+  (sites) => { sitesDraft.value = (sites ?? []).join("\n") },
+  { immediate: true },
+);
+
+async function saveSites() {
+  if (sitesDraft.value === (app.settings.focusBlockSites ?? []).join("\n")) return;
+  await app.updateSettings({ focusBlockSites: sitesDraft.value });
+}
+
+/**
+ * macOS decides whether one app may drive another, and refuses silently. The
+ * only honest way to report that is to try it and say what came back.
+ */
+async function checkBlockPermission() {
+  checkingBlock.value = true;
+  try {
+    blockPermission.value = await ipc.checkFocusBlock();
+  } catch {
+    blockPermission.value = "denied";
+  } finally {
+    checkingBlock.value = false;
+  }
+}
 
 const pathDraft = ref("");
 const editingPath = ref(false);
@@ -118,6 +157,67 @@ async function renameCategory(id: number, event: Event) {
 async function recolour(id: number, color: string) {
   recolouring.value = null;
   await categories.update(id, { color });
+}
+
+const slackToken = ref("");
+const slackBusy = ref(false);
+const slackCopied = ref(false);
+
+/**
+ * Slack can build the whole app from this, so setting it up is one paste
+ * rather than hunting for the right scopes. Only user scopes: the point is to
+ * post as you, which a bot token cannot do.
+ */
+const SLACK_MANIFEST = `display_information:
+  name: Crushit
+oauth_config:
+  scopes:
+    user:
+      - im:history
+      - users:read
+      - chat:write
+settings:
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false`;
+
+async function copyManifest(event: Event) {
+  const field = (event.currentTarget as HTMLElement)
+    .closest("section")
+    ?.querySelector("textarea");
+  try {
+    await navigator.clipboard.writeText(SLACK_MANIFEST);
+    slackCopied.value = true;
+    setTimeout(() => (slackCopied.value = false), 2000);
+  } catch {
+    // Selecting it is the fallback when the clipboard is not available.
+    field?.select();
+  }
+}
+
+async function openSlackApps() {
+  try {
+    await openUrl("https://api.slack.com/apps");
+  } catch {
+    // Nothing to do if no browser will open; the address is on screen anyway.
+  }
+}
+
+async function connectSlack() {
+  slackBusy.value = true;
+  const connected = await slack.connect(slackToken.value.trim() || null);
+  slackBusy.value = false;
+  if (connected) {
+    slackToken.value = "";
+    await app.updateSettings({});
+  }
+}
+
+async function disconnectSlack() {
+  slackBusy.value = true;
+  await slack.connect(null);
+  slackBusy.value = false;
+  await app.updateSettings({});
 }
 
 async function reveal() {
@@ -260,16 +360,13 @@ async function reveal() {
         <h2 class="eyebrow">Coding agent</h2>
 
         <!-- Segmented switch: one agent plans and, later, writes the code. -->
-        <div class="mt-1.5 flex gap-1 rounded-[11px] border border-line bg-line-soft/60 p-1">
+        <div class="segmented mt-1.5 flex w-full">
           <button
             v-for="option in AGENTS"
             :key="option"
-            class="flex-1 rounded-[8px] py-1.5 text-[11.5px] font-semibold transition-colors"
-            :class="
-              selected === option
-                ? 'bg-solid text-on-solid'
-                : 'text-ink-2 hover:text-ink'
-            "
+            class="segmented-item flex-1 py-1.5"
+            :class="selected === option && 'is-selected'"
+            :aria-pressed="selected === option"
             @click="chooseAgent(option)"
           >
             {{ AGENT_LABELS[option] }}
@@ -370,6 +467,83 @@ async function reveal() {
       </section>
 
       <section class="mt-4">
+        <h2 class="eyebrow">Slack</h2>
+        <p class="mt-1 text-[11px] leading-relaxed text-ink-2">
+          Shows the direct messages waiting on you, and drafts a reply from your
+          task list and repository. Nothing is sent until you press Send, and it
+          goes out under your own name.
+        </p>
+
+        <div class="card mt-1.5 px-3 py-3">
+          <template v-if="app.settings.slackConnected">
+            <p class="flex items-center gap-1.5 text-[12.5px] font-semibold">
+              <AppIcon name="check" :size="12" :weight="2.4" class="text-success" />
+              Connected{{ slack.account ? ` as ${slack.account.user}` : "" }}
+            </p>
+            <p v-if="slack.account" class="mt-0.5 text-[11px] text-ink-2">
+              {{ slack.account.team }}
+            </p>
+            <button
+              class="btn btn-ghost mt-2 w-full py-1.5 text-[11.5px] text-ink-2 hover:text-danger"
+              :disabled="slackBusy"
+              @click="disconnectSlack"
+            >
+              Disconnect
+            </button>
+          </template>
+
+          <template v-else>
+            <ol class="space-y-1 text-[11.5px] leading-relaxed text-ink-2">
+              <li>
+                <span class="font-semibold text-ink">1.</span> Copy this app manifest
+                and create a Slack app from it — <em>Create New App → From a manifest</em>.
+              </li>
+              <li>
+                <span class="font-semibold text-ink">2.</span> Install it to your
+                workspace, then copy the <em>User OAuth Token</em>.
+              </li>
+              <li><span class="font-semibold text-ink">3.</span> Paste it below.</li>
+            </ol>
+
+            <textarea
+              :value="SLACK_MANIFEST"
+              readonly
+              rows="5"
+              aria-label="Slack app manifest"
+              class="field mt-2 w-full resize-none px-2 py-1.5 font-mono text-[10.5px] leading-snug"
+            />
+            <div class="mt-1.5 flex gap-1.5">
+              <button class="btn btn-ghost flex-1 py-1.5 text-[11.5px]" @click="copyManifest">
+                {{ slackCopied ? "Copied" : "Copy manifest" }}
+              </button>
+              <button class="btn btn-ghost flex-1 py-1.5 text-[11.5px]" @click="openSlackApps">
+                Open Slack apps
+              </button>
+            </div>
+            <div class="mt-2 flex gap-1.5">
+              <input
+                v-model="slackToken"
+                type="password"
+                placeholder="xoxp-…"
+                aria-label="Slack user token"
+                class="field min-w-0 flex-1 px-2 py-1.5 text-[11.5px]"
+                @keydown.enter.prevent="connectSlack"
+              />
+              <button
+                class="btn btn-dark shrink-0 px-2.5 py-1.5 text-[11.5px]"
+                :disabled="!slackToken.trim() || slackBusy"
+                @click="connectSlack"
+              >
+                {{ slackBusy ? "Checking…" : "Connect" }}
+              </button>
+            </div>
+          </template>
+
+          <p v-if="slack.error" class="mt-1.5 text-[11px] text-danger">{{ slack.error }}</p>
+        </div>
+      </section>
+
+      <section class="mt-4">
         <h2 class="eyebrow">Focus length</h2>
         <div class="mt-1.5 flex items-center gap-1.5">
           <button
@@ -400,18 +574,79 @@ async function reveal() {
         </p>
       </section>
 
+      <!-- Sitting under Focus length because it only ever applies to a running
+           session: nothing here changes what the browser does otherwise. -->
+      <section class="mt-4">
+        <h2 class="eyebrow">Distractions</h2>
+        <div class="card mt-1.5 px-3">
+          <ToggleSwitch
+            :model-value="app.settings.focusBlockEnabled"
+            label="Block these sites while focusing"
+            hint="A tab on one of them is sent to a holding page until the session ends"
+            @update:model-value="app.updateSettings({ focusBlockEnabled: $event })"
+          />
+        </div>
+
+        <template v-if="app.settings.focusBlockEnabled">
+          <textarea
+            v-model="sitesDraft"
+            rows="5"
+            spellcheck="false"
+            aria-label="Blocked sites"
+            placeholder="instagram.com"
+            class="field mt-1.5 w-full resize-none px-2.5 py-2 text-[11.5px] leading-relaxed"
+            @blur="saveSites"
+          />
+          <p class="mt-1 text-[11px] text-ink-2">
+            One site per line. Subdomains are included, so
+            <span class="font-semibold text-ink">facebook.com</span> also covers
+            m.facebook.com.
+          </p>
+
+          <!-- Blocking depends on a permission macOS grants per app, and a
+               refusal is silent — so there is a way to ask outright. -->
+          <div class="card mt-1.5 flex items-center gap-2.5 px-3 py-2.5">
+            <div class="min-w-0 flex-1">
+              <p class="text-[12.5px] font-semibold">Browser access</p>
+              <p
+                class="mt-px text-[11px] leading-snug"
+                :class="blockPermission === 'denied' ? 'text-danger' : 'text-ink-2'"
+              >
+                <template v-if="blockPermission === 'granted'">
+                  Working — your browsers answer when asked.
+                </template>
+                <template v-else-if="blockPermission === 'denied'">
+                  macOS is refusing. Allow Crushit under Privacy &amp; Security →
+                  Automation, then check again.
+                </template>
+                <template v-else-if="blockPermission === 'unknown'">
+                  No browser was open to ask. Open one and check again.
+                </template>
+                <template v-else>
+                  macOS asks for permission the first time a session blocks a site.
+                </template>
+              </p>
+            </div>
+            <button
+              class="btn btn-ghost shrink-0 px-3 py-1.5 text-[11.5px]"
+              :disabled="checkingBlock"
+              @click="checkBlockPermission"
+            >
+              {{ checkingBlock ? "Checking…" : "Check" }}
+            </button>
+          </div>
+        </template>
+      </section>
+
       <section class="mt-4">
         <h2 class="eyebrow">Appearance</h2>
-        <div class="mt-1.5 flex gap-1 rounded-[11px] border border-line bg-line-soft/60 p-1">
+        <div class="segmented mt-1.5 flex w-full">
           <button
             v-for="option in THEMES"
             :key="option"
-            class="flex-1 rounded-[8px] py-1.5 text-[11.5px] font-semibold transition-colors"
-            :class="
-              app.settings.theme === option
-                ? 'bg-solid text-on-solid'
-                : 'text-ink-2 hover:text-ink'
-            "
+            class="segmented-item flex-1 py-1.5"
+            :class="app.settings.theme === option && 'is-selected'"
+            :aria-pressed="app.settings.theme === option"
             @click="app.updateSettings({ theme: option as Theme })"
           >
             {{ THEME_LABELS[option] }}

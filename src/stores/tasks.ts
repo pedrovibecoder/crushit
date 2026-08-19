@@ -11,8 +11,18 @@ const OPEN_STATUSES: TaskStatus[] = [
   "backlog",
 ];
 
+/** How long the row's exit animation runs, in step with `.row-deleting`. */
+const ROW_EXIT_MS = 340;
+
+/** Someone who has asked for less motion should not be made to wait for any. */
+function wantsMotion() {
+  return !window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+}
+
 export const useTasksStore = defineStore("tasks", () => {
   const tasks = ref<Task[]>([]);
+  /** The task currently being thrown off the list, so its row can show it. */
+  const deletingId = ref<number | null>(null);
   const error = ref<string | null>(null);
   /** Set when a task has just been finished, so the UI can celebrate it. */
   const celebration = ref<{ title: string; at: number } | null>(null);
@@ -121,9 +131,20 @@ export const useTasksStore = defineStore("tasks", () => {
     return setStatus(task.id, task.status === "completed" ? "ready" : "completed");
   }
 
+  /**
+   * Lets the row play its exit before the row is taken away. Deleting is the
+   * one destructive thing in the list, and seeing which row went is the whole
+   * reassurance that the right one did.
+   */
   async function remove(taskId: number) {
+    if (wantsMotion()) {
+      deletingId.value = taskId;
+      await new Promise((resolve) => setTimeout(resolve, ROW_EXIT_MS));
+    }
     const done = await run(() => ipc.deleteTask(taskId));
     if (done !== null) tasks.value = tasks.value.filter((t) => t.id !== taskId);
+    // Cleared either way: a delete that failed leaves the row where it was.
+    deletingId.value = null;
   }
 
   async function reorder(projectId: number, orderedIds: number[]) {
@@ -138,6 +159,7 @@ export const useTasksStore = defineStore("tasks", () => {
 
   return {
     tasks,
+    deletingId,
     error,
     celebration,
     clearCelebration,

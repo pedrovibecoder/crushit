@@ -68,6 +68,8 @@ export interface Task {
   estimateMinutes: number | null;
   /** Relative size on the Fibonacci scale, when one has been estimated. */
   storyPoints: number | null;
+  /** The day this task sits on, as `YYYY-MM-DD` on the local clock. */
+  plannedFor: string;
   isAiGenerated: boolean;
   createdAt: number;
   updatedAt: number;
@@ -96,6 +98,7 @@ export interface NewTask {
   status?: TaskStatus;
   estimateMinutes?: number | null;
   storyPoints?: number | null;
+  plannedFor?: string;
   criteria?: string[];
   files?: string[];
 }
@@ -107,6 +110,7 @@ export interface TaskPatch {
   status?: TaskStatus;
   estimateMinutes?: number;
   storyPoints?: number;
+  plannedFor?: string;
   criteria?: string[];
   files?: string[];
   dependsOn?: number[];
@@ -134,6 +138,27 @@ export interface RestSnapshot {
 /** What a break may be set to, matching the backend's own list. */
 export const REST_CHOICES = [5, 10, 20, 30] as const;
 
+export interface SlackAccount {
+  userId: string;
+  user: string;
+  team: string;
+}
+
+export interface SlackMessage {
+  user: string;
+  author: string;
+  text: string;
+  ts: string;
+  isMine: boolean;
+}
+
+export interface WaitingConversation {
+  id: string;
+  with: string;
+  messages: SlackMessage[];
+  waitingSeconds: number;
+}
+
 export interface Settings {
   focusMinutes: number;
   showTimerInMenuBar: boolean;
@@ -144,12 +169,21 @@ export interface Settings {
   codexModel: string | null;
   claudePath: string | null;
   claudeModel: string | null;
+  /** Whether a Slack token is saved. The token itself never leaves the backend. */
+  slackConnected: boolean;
   theme: Theme;
   notifications: boolean;
   sounds: boolean;
   launchAtLogin: boolean;
+  /** Send blocked sites to a holding page while a session is running. */
+  focusBlockEnabled: boolean;
+  /** The sites that are shut during a session, as bare hosts. */
+  focusBlockSites: string[];
   onboarded: boolean;
 }
+
+/** Whether macOS lets the app ask a browser what it is showing. */
+export type BlockPermission = "unknown" | "granted" | "denied";
 
 export interface SettingsPatch {
   focusMinutes?: number;
@@ -165,6 +199,9 @@ export interface SettingsPatch {
   notifications?: boolean;
   sounds?: boolean;
   launchAtLogin?: boolean;
+  focusBlockEnabled?: boolean;
+  /** Written as typed — the backend reads the list leniently. */
+  focusBlockSites?: string;
   onboarded?: boolean;
 }
 

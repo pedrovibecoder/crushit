@@ -127,6 +127,7 @@ mod tests {
             description: Some("Render an invoice to a PDF buffer.".into()),
             category: "task".into(),
             story_points: Some(3),
+            planned_for: "2026-08-19".into(),
             status: TaskStatus::InProgress,
             position: 0,
             estimate_minutes: Some(45),

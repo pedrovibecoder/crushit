@@ -10,6 +10,10 @@ const props = defineProps<{
   focused: boolean;
   remainingSeconds: number;
   blockedBy: Task[];
+  /** True while this row is being deleted, so it can play its way out. */
+  deleting?: boolean;
+  /** True when the task was planned for an earlier day and is still open. */
+  carriedOver?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -33,7 +37,10 @@ const trailing = computed(() => {
 <template>
   <div
     class="card flex cursor-pointer items-start gap-2.5 px-2.5 py-2.5 transition-colors"
-    :class="focused ? 'border-accent/45 bg-accent-soft/50' : 'hover:bg-line-soft/70'"
+    :class="[
+      focused ? 'border-accent/45 bg-accent-soft/50' : 'hover:bg-line-soft/70',
+      deleting && 'row-deleting',
+    ]"
     role="button"
     tabindex="0"
     @click="emit('open')"
@@ -74,6 +81,9 @@ const trailing = computed(() => {
         </span>
         <span v-if="blockedBy.length" class="chip border-warn/30 bg-warn-soft text-warn">
           Blocked
+        </span>
+        <span v-if="carriedOver" class="chip text-ink-3" title="Planned for an earlier day">
+          Carried over
         </span>
       </div>
     </div>

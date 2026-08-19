@@ -10,6 +10,7 @@ import { useAppStore, type View } from "./stores/app";
 import { useTasksStore } from "./stores/tasks";
 import ChangesView from "./views/ChangesView.vue";
 import HistoryView from "./views/HistoryView.vue";
+import SlackView from "./views/SlackView.vue";
 import GoalView from "./views/GoalView.vue";
 import OnboardingView from "./views/OnboardingView.vue";
 import ProjectsView from "./views/ProjectsView.vue";
@@ -44,6 +45,7 @@ const VIEWS = {
   settings: SettingsView,
   changes: ChangesView,
   history: HistoryView,
+  slack: SlackView,
   onboarding: OnboardingView,
 };
 
