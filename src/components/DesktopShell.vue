@@ -27,6 +27,7 @@ const NAV: Array<{ id: View; label: string; icon: string }> = [
   { id: "today", label: "Today", icon: "check" },
   { id: "goal", label: "Goal", icon: "sparkle" },
   { id: "changes", label: "Changes", icon: "branch" },
+  { id: "history", label: "History", icon: "calendar" },
   { id: "settings", label: "Settings", icon: "gear" },
 ];
 
@@ -83,7 +84,10 @@ const agentState = computed(() => {
         </button>
       </nav>
 
-      <div class="border-t border-line px-3 py-2.5">
+      <!-- What is running sits above the bar, so the bar itself is the same
+           height as the screen's own footer and the two line up across the
+           window rather than stepping. -->
+      <div class="px-3 pb-2">
         <p v-if="focus.isActive" class="tnum text-[13px] font-semibold">
           {{ formatClock(focus.snapshot.remainingSeconds) }}
           <span class="text-[11px] font-medium text-ink-2">
@@ -94,9 +98,11 @@ const agentState = computed(() => {
           {{ agentState.label }}
         </p>
         <p v-if="!focus.isActive && !agentState" class="text-[11px] text-ink-3">Nothing running</p>
+      </div>
 
+      <div class="border-t border-line px-3 py-2.5">
         <button
-          class="btn btn-ghost mt-2 w-full py-1.5 text-[11.5px]"
+          class="btn btn-ghost w-full py-2 text-[12px]"
           @click="ipc.hideDesktopWindow()"
         >
           Hide to menu bar
@@ -111,11 +117,16 @@ const agentState = computed(() => {
         Loading…
       </div>
       <div v-else-if="app.failed" class="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
-        <p class="text-[12.5px] font-semibold">Blitzit could not start up</p>
+        <p class="text-[12.5px] font-semibold">Crushit could not start up</p>
         <p class="text-[11.5px] leading-relaxed text-ink-2">{{ app.error }}</p>
         <button class="btn btn-dark mt-1 px-4 py-2" @click="app.bootstrap()">Try again</button>
       </div>
-      <div v-else class="mx-auto w-full max-w-[720px] flex-1 overflow-y-auto">
+      <!-- The screen itself fills this column, so its footer sits on the
+           bottom edge of the window instead of trailing the content. -->
+      <div
+        v-else
+        class="mx-auto flex w-full max-w-[720px] min-h-0 flex-1 flex-col [&>*]:min-h-0 [&>*]:flex-1"
+      >
         <Transition name="screen" mode="out-in">
           <component :is="current" :key="app.view" />
         </Transition>

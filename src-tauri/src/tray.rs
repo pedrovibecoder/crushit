@@ -11,6 +11,8 @@ pub enum MenuBarState {
     /// Icon only.
     Idle,
     Focus { remaining_seconds: i64 },
+    /// Taking a break, with what is left of it.
+    Rest { remaining_seconds: i64 },
     /// Codex is working: analysing a repository, or later, writing code.
     Coding,
     AwaitingApproval,
@@ -23,6 +25,9 @@ impl MenuBarState {
         match self {
             MenuBarState::Idle => None,
             MenuBarState::Focus { remaining_seconds } => Some(format_clock(*remaining_seconds)),
+            MenuBarState::Rest { remaining_seconds } => {
+                Some(format!("☕ {}", format_clock(*remaining_seconds)))
+            }
             MenuBarState::Coding => Some("Coding…".to_string()),
             MenuBarState::AwaitingApproval => Some("Approval".to_string()),
             MenuBarState::Done => Some("Done".to_string()),
@@ -39,6 +44,17 @@ pub fn render(app: &AppHandle, state: &MenuBarState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_break_reads_as_a_break_rather_than_as_more_work() {
+        let title = MenuBarState::Rest {
+            remaining_seconds: 300,
+        }
+        .title()
+        .expect("a break has a title");
+        assert!(title.contains("5:00"), "{title}");
+        assert!(title.starts_with('☕'), "{title}");
+    }
 
     #[test]
     fn idle_shows_no_title_and_focus_shows_the_clock() {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Blitzit",
+  "productName": "Crushit",
   "version": "0.1.0",
   "identifier": "com.cleonart.blitzit",
   "build": {
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "popup",
-        "title": "Blitzit",
+        "title": "Crushit",
         "width": 360,
         "height": 520,
         "resizable": false,
@@ -28,7 +28,7 @@
       },
       {
         "label": "main",
-        "title": "Blitzit",
+        "title": "Crushit",
         "width": 940,
         "height": 640,
         "minWidth": 720,

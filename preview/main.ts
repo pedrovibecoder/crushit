@@ -4,7 +4,20 @@ import App from "../src/App.vue";
 import { useAppStore } from "../src/stores/app";
 import "./preview.css";
 
-createApp(App).use(createPinia()).mount("#app");
+const previewApp = createApp(App).use(createPinia());
+/**
+ * A component that throws during render unmounts silently, leaving a blank
+ * panel and no clue why. In review that is the difference between finding a
+ * bug in seconds and mistaking it for a rendering artifact.
+ */
+previewApp.config.errorHandler = (error, _instance, info) => {
+  const box = document.createElement("div");
+  box.textContent = `RENDER ERROR (${info}): ${String(error)}\n${(error as Error)?.stack ?? ""}`;
+  box.style.cssText =
+    "position:fixed;inset:0;z-index:99999;background:#ff0;color:#000;font:11px monospace;padding:8px;white-space:pre-wrap;overflow:auto";
+  document.body.appendChild(box);
+};
+previewApp.mount("#app");
 
 // `?view=task&task=1` renders a specific screen for review.
 const params = new URLSearchParams(location.search);
@@ -12,9 +25,11 @@ const view = params.get("view");
 if (view) {
   setTimeout(() => {
     const store = useAppStore();
-    store.view = view as never;
+    // The task has to be chosen before the screen is: the app sends you back to
+    // Today if it lands on the task screen with nothing selected.
     store.selectedTaskId = Number(params.get("task") ?? 1);
-  }, 150);
+    store.view = view as never;
+  }, 500);
 }
 
 // `?celebrate=1` shows the task-completed celebration.
@@ -73,4 +88,25 @@ if (params.get("diff")) {
     const { useReviewStore } = await import("../src/stores/review");
     void useReviewStore().openDiff("src/permissions/keys.ts");
   }, 400);
+}
+
+// `?confirm=delete` opens a task and arms its delete confirmation.
+if (params.get("confirm") === "delete") {
+  const find = (label: string) =>
+    [...document.querySelectorAll("button")].find(
+      (element) => element.getAttribute("aria-label") === label,
+    );
+  const tick = () => new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+  void (async () => {
+    for (let i = 0; i < 300; i += 1) {
+      const row = document.querySelector<HTMLElement>('div[role="button"]');
+      if (row) { row.click(); break; }
+      await tick();
+    }
+    for (let i = 0; i < 300; i += 1) {
+      const button = find("Delete task");
+      if (button) { button.click(); break; }
+      await tick();
+    }
+  })();
 }

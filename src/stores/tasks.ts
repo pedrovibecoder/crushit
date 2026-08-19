@@ -34,6 +34,27 @@ export const useTasksStore = defineStore("tasks", () => {
     return { done, total, ratio: total === 0 ? 0 : done / total };
   });
 
+  /**
+   * The same picture weighed by size rather than by count. Ten trivial tasks
+   * and one large one are not half done when five of the small ones are, and
+   * this is the number a sprint is actually tracked against.
+   */
+  const pointsProgress = computed(() => {
+    let done = 0;
+    let total = 0;
+    for (const task of tasks.value) {
+      const points = task.storyPoints ?? 0;
+      total += points;
+      if (task.status === "completed") done += points;
+    }
+    return { done, total, ratio: total === 0 ? 0 : done / total };
+  });
+
+  /** What is being worked on right now, agent or not. */
+  const inProgress = computed(
+    () => tasks.value.filter((task) => task.status === "in-progress").length,
+  );
+
   /** A task is blocked while any task it depends on is still open. */
   function blockedBy(task: Task): Task[] {
     return task.dependsOn
@@ -124,6 +145,8 @@ export const useTasksStore = defineStore("tasks", () => {
     openTasks,
     completedTasks,
     progress,
+    pointsProgress,
+    inProgress,
     blockedBy,
     set,
     load,

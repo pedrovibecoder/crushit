@@ -34,56 +34,48 @@
   /* Progress runs warm to cool as it completes. */
   --color-progress-from: #f2c744;
   --color-progress-to: #7ed957;
-
-  /* One dot colour per task category. */
-  --color-cat-frontend: #4a9bf5;
-  --color-cat-backend: #7b61ff;
-  --color-cat-database: #3fbf6a;
-  --color-cat-security: #e05656;
-  --color-cat-testing: #e2a32c;
-  --color-cat-devops: #20b1c4;
-  --color-cat-refactor: #8a8f9a;
-  --color-cat-bug: #e0609b;
 }
 
 /*
- * GitHub Dark Default. Only the palette changes: every utility in the app
- * resolves through these variables, so the layout and type scale are shared.
+ * GitHub Dark Default, taken from Primer's current dark tokens rather than the
+ * older ones github.com used to ship. Only the palette changes: every utility
+ * in the app resolves through these variables, so the layout and type scale
+ * are shared with the light theme.
+ *
+ * The `-soft` fills are Primer's translucent subtle tokens flattened against
+ * the page, since these surfaces sit on cards as often as on the background.
  */
 :root[data-theme="github-dark"] {
+  /* bgColor-default and bgColor-muted. */
   --color-page: #0d1117;
-  --color-card: #161b22;
+  --color-card: #151b23;
 
-  --color-line: #30363d;
-  --color-line-soft: #21262d;
+  /* borderColor-default and borderColor-muted. */
+  --color-line: #3d444d;
+  --color-line-soft: #262c36;
 
-  --color-ink: #e6edf3;
-  --color-ink-2: #8b949e;
-  --color-ink-3: #6e7681;
+  /* fgColor-default, -muted, -disabled. */
+  --color-ink: #f0f6fc;
+  --color-ink-2: #9198a1;
+  --color-ink-3: #656c76;
 
-  --color-accent: #58a6ff;
-  --color-accent-soft: #18273a;
+  --color-accent: #4493f8;
+  --color-accent-soft: #121d2f;
   --color-success: #3fb950;
-  --color-success-soft: #152a20;
+  --color-success-soft: #12261e;
   --color-warn: #d29922;
-  --color-warn-soft: #2b2519;
+  --color-warn-soft: #272115;
   --color-danger: #f85149;
-  --color-danger-soft: #301b1f;
+  --color-danger-soft: #25171c;
 
+  /* accent-emphasis: the blue GitHub fills a selected control with. */
   --color-solid: #1f6feb;
   --color-on-solid: #ffffff;
 
   --color-progress-from: #d29922;
   --color-progress-to: #3fb950;
 
-  --color-cat-frontend: #58a6ff;
-  --color-cat-backend: #a371f7;
-  --color-cat-database: #3fb950;
-  --color-cat-security: #f85149;
-  --color-cat-testing: #d29922;
-  --color-cat-devops: #39c5cf;
-  --color-cat-refactor: #8b949e;
-  --color-cat-bug: #db61a2;
+  --progress-wash: 0.62;
 
   color-scheme: dark;
 }
@@ -130,11 +122,134 @@ textarea {
     border-radius: 12px;
   }
 
+  /*
+   * The one card on Today that is not just information: a soft wash of colour
+   * in the corner, so the screen opens on something with a bit of life in it.
+   * The blob is drawn behind the content and clipped by the card's radius.
+   */
+  .progress-card {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+  }
+  .progress-card::after {
+    content: "";
+    position: absolute;
+    inset: -40% -25% -40% 35%;
+    z-index: -1;
+    pointer-events: none;
+    background:
+      radial-gradient(58% 62% at 62% 26%, #7b61ff 0%, transparent 72%),
+      radial-gradient(52% 58% at 96% 62%, #e0609b 0%, transparent 74%),
+      radial-gradient(60% 60% at 58% 96%, #4a9bf5 0%, transparent 72%);
+    opacity: var(--progress-wash, 0.4);
+    filter: blur(16px);
+  }
+
+  /*
+   * The filled part of a progress bar rolls, both waves running the way the
+   * bar fills. Two speeds rather than one keep it from reading as a single
+   * sliding texture; the SVG is inline so nothing is fetched to draw it.
+   */
+  .progress-wave {
+    position: absolute;
+    inset: 0;
+    background-repeat: repeat-x;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 12' preserveAspectRatio='none'><path d='M0 6 Q5 1.6 10 6 T20 6 T30 6 T40 6 V12 H0 Z' fill='%23ffffff' fill-opacity='0.3'/></svg>");
+    background-size: 40px 100%;
+    animation: progress-wave 2.1s linear infinite;
+  }
+  .progress-wave::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background-repeat: repeat-x;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 12' preserveAspectRatio='none'><path d='M0 7 Q5 11 10 7 T20 7 T30 7 T40 7 V0 H0 Z' fill='%23000000' fill-opacity='0.14'/></svg>");
+    background-size: 26px 100%;
+    animation: progress-wave-under 3.4s linear infinite;
+  }
+
+  @keyframes progress-wave {
+    to {
+      background-position-x: 40px;
+    }
+  }
+
+  @keyframes progress-wave-under {
+    to {
+      background-position-x: 26px;
+    }
+  }
+
+  /* A bar that never stops moving is the wrong thing to put in front of
+     someone who has asked the system for less of it. */
+  @media (prefers-reduced-motion: reduce) {
+    .progress-wave,
+    .progress-wave::after {
+      animation: none;
+    }
+  }
+
+  /*
+   * A break, drawn rather than described: the sleeper breathes and the Zs drift
+   * up and fade, which is the whole of the animation and the whole of the point.
+   */
+  .sleeper {
+    transform-origin: 50% 72%;
+    animation: sleeper-breathe 3.6s ease-in-out infinite;
+  }
+
+  @keyframes sleeper-breathe {
+    0%,
+    100% {
+      transform: scale(1);
+    }
+    50% {
+      transform: scale(1.045);
+    }
+  }
+
+  .snore {
+    opacity: 0;
+    animation: snore-drift 3s ease-in-out infinite;
+  }
+
+  @keyframes snore-drift {
+    0% {
+      opacity: 0;
+      transform: translate(0, 0) rotate(-6deg) scale(0.7);
+    }
+    22% {
+      opacity: 0.95;
+    }
+    100% {
+      opacity: 0;
+      transform: translate(16px, -46px) rotate(10deg) scale(1.25);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sleeper,
+    .snore {
+      animation: none;
+    }
+    .snore {
+      opacity: 0.8;
+    }
+  }
+
   /* Small bordered label: category, count, estimate, status. */
   .chip {
     display: inline-flex;
     align-items: center;
     gap: 4px;
+    /* A chip holds text the app did not write — a branch name, a category, a
+       line an agent read off a screenshot — so it has to give rather than push
+       the row wider than the panel. Chips still sit on one line each: in a
+       wrapping row a chip that does not fit moves down whole, and only one
+       wider than the row itself breaks inside. */
+    max-width: 100%;
+    overflow-wrap: anywhere;
     padding: 2px 6px;
     border: 1px solid var(--color-line);
     border-radius: 7px;
@@ -142,7 +257,6 @@ textarea {
     font-size: 10px;
     font-weight: 600;
     line-height: 1.5;
-    white-space: nowrap;
   }
 
   .btn {
@@ -216,7 +330,17 @@ textarea {
      desktop window, which sets `--panel-max` to none and scrolls the column. */
   .panel-scroll {
     max-height: var(--panel-max, 380px);
+    /* In the desktop window a screen fills the height, so the body takes what
+       is left between the header and the footer and scrolls there — which is
+       what keeps the footer on the bottom edge rather than under the content.
+       In the popup there is no spare height to take, so this changes nothing. */
+    flex: 1 1 auto;
+    min-height: 0;
     overflow-y: auto;
+    /* Never sideways. Anything genuinely wide — a diff — scrolls inside its
+       own box, so a single long word in agent-written text cannot drag the
+       whole screen off to the right. */
+    overflow-x: hidden;
   }
 
   /* Tiny gray section label above a group. */
@@ -260,11 +384,23 @@ textarea {
   width: calc(100% - 1.75rem);
 }
 
+/* A deleted row shrinks slightly as it goes, so it reads as being taken away
+   rather than simply blinking out. */
+.row-leave-to {
+  transform: translateY(-4px) scale(0.97);
+}
+
+/* And the rows below it slide up to close the gap, instead of snapping. */
+.row-move {
+  transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .screen-enter-active,
   .screen-leave-active,
   .row-enter-active,
-  .row-leave-active {
+  .row-leave-active,
+  .row-move {
     transition: none;
   }
 }

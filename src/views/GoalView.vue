@@ -26,6 +26,11 @@ const stage = computed(() => {
   return "compose";
 });
 
+/** What the whole plan comes to, which is the number a sprint is planned on. */
+const totalPoints = computed(() =>
+  (codex.plan?.tasks ?? []).reduce((sum, task) => sum + (task.storyPoints || 0), 0),
+);
+
 const failure = computed(() => codex.analysis.error ?? codex.goal?.error ?? null);
 
 onMounted(() => {
@@ -191,7 +196,7 @@ async function discard() {
 
       <!-- Review the generated plan -->
       <template v-else-if="stage === 'plan' && codex.plan">
-        <p v-if="codex.plan.summary" class="text-[12.5px] leading-relaxed text-ink-2">
+        <p v-if="codex.plan.summary" class="text-[12.5px] leading-relaxed break-words text-ink-2">
           {{ codex.plan.summary }}
         </p>
 
@@ -204,7 +209,7 @@ async function discard() {
               class="flex items-start gap-2 text-[11.5px] leading-snug text-ink-2"
             >
               <AppIcon name="check" :size="11" class="mt-[3px] shrink-0 text-success" />
-              <span class="min-w-0 flex-1">{{ item }}</span>
+              <span class="min-w-0 flex-1 break-words">{{ item }}</span>
             </li>
           </ul>
         </div>
@@ -218,9 +223,14 @@ async function discard() {
           </ul>
         </div>
 
-        <h2 class="eyebrow mt-4">
-          {{ codex.plan.tasks.length }} task{{ codex.plan.tasks.length === 1 ? "" : "s" }}
-        </h2>
+        <div class="mt-4 flex items-baseline justify-between gap-2">
+          <h2 class="eyebrow">
+            {{ codex.plan.tasks.length }} task{{ codex.plan.tasks.length === 1 ? "" : "s" }}
+          </h2>
+          <span v-if="totalPoints" class="tnum text-[11px] font-semibold text-ink-3">
+            {{ totalPoints }} SP total
+          </span>
+        </div>
         <ol class="mt-1.5 space-y-1.5">
           <li
             v-for="(task, index) in codex.plan.tasks"
@@ -231,15 +241,18 @@ async function discard() {
               <span class="tnum shrink-0 text-[11px] font-semibold text-ink-3">
                 {{ index + 1 }}
               </span>
-              <span class="min-w-0 flex-1 text-[12.5px] leading-snug font-semibold">
+              <span class="min-w-0 flex-1 text-[12.5px] leading-snug font-semibold break-words">
                 {{ task.title }}
               </span>
             </div>
-            <p v-if="task.description" class="mt-1 pl-5 text-[11.5px] leading-snug text-ink-2">
+            <p v-if="task.description" class="mt-1 pl-5 text-[11.5px] leading-snug break-words text-ink-2">
               {{ task.description }}
             </p>
             <div class="mt-1.5 flex flex-wrap items-center gap-1 pl-5">
               <CategoryPill :category="task.category" />
+              <span v-if="task.storyPoints > 0" class="chip tnum text-ink-2" title="Story points">
+                {{ task.storyPoints }} SP
+              </span>
               <span v-if="task.estimateMinutes > 0" class="chip text-ink-2">
                 {{ formatDuration(task.estimateMinutes) }}
               </span>

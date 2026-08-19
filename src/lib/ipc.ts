@@ -5,6 +5,9 @@ import type {
   AgentStatus,
   AnalysisSnapshot,
   Bootstrap,
+  Category,
+  CompletedTask,
+  CategoryPatch,
   ExecutionSnapshot,
   RepoChanges,
   Stats,
@@ -14,6 +17,7 @@ import type {
   NewTask,
   Project,
   ProjectInspection,
+  RestSnapshot,
   Settings,
   SettingsPatch,
   ShortcutInfo,
@@ -42,13 +46,25 @@ export const ipc = {
   refreshProject: (projectId: number) =>
     invoke<Project>("refresh_project", { projectId }),
 
+  listCategories: () => invoke<Category[]>("list_categories"),
+  createCategory: (label: string, color: string) =>
+    invoke<Category[]>("create_category", { label, color }),
+  updateCategory: (categoryId: number, patch: CategoryPatch) =>
+    invoke<Category[]>("update_category", { categoryId, patch }),
+  deleteCategory: (categoryId: number) =>
+    invoke<Category[]>("delete_category", { categoryId }),
+
   listTasks: (projectId: number) => invoke<Task[]>("list_tasks", { projectId }),
+  completedTasks: (projectId: number, days: number) =>
+    invoke<CompletedTask[]>("completed_tasks", { projectId, days }),
   createTask: (input: NewTask) => invoke<Task>("create_task", { input }),
   updateTask: (taskId: number, patch: TaskPatch) =>
     invoke<Task>("update_task", { taskId, patch }),
   deleteTask: (taskId: number) => invoke<void>("delete_task", { taskId }),
   reorderTasks: (projectId: number, orderedIds: number[]) =>
     invoke<Task[]>("reorder_tasks", { projectId, orderedIds }),
+  suggestCriteria: (taskId: number) =>
+    invoke<string[]>("suggest_criteria", { taskId }),
   setCriterionMet: (criterionId: number, isMet: boolean) =>
     invoke<Task>("set_criterion_met", { criterionId, isMet }),
 
@@ -58,6 +74,10 @@ export const ipc = {
   pauseFocus: () => invoke<FocusSnapshot>("pause_focus"),
   resumeFocus: () => invoke<FocusSnapshot>("resume_focus"),
   stopFocus: () => invoke<FocusSnapshot>("stop_focus"),
+
+  restSnapshot: () => invoke<RestSnapshot>("rest_snapshot"),
+  startRest: (minutes: number) => invoke<RestSnapshot>("start_rest", { minutes }),
+  stopRest: () => invoke<RestSnapshot>("stop_rest"),
 
   performanceStats: () => invoke<Stats>("performance_stats"),
 
@@ -75,6 +95,8 @@ export const ipc = {
   startAnalysis: (projectId: number, prompt: string) =>
     invoke<Goal>("start_analysis", { projectId, prompt }),
   cancelAnalysis: () => invoke<AnalysisSnapshot>("cancel_analysis"),
+  importTasks: (projectId: number, path: string) =>
+    invoke<Goal>("import_tasks", { projectId, path }),
   acceptPlan: (goalId: number) => invoke<Task[]>("accept_plan", { goalId }),
   discardPlan: (goalId: number) => invoke<void>("discard_plan", { goalId }),
 
@@ -98,7 +120,7 @@ export const ipc = {
   popupShortcut: () => invoke<ShortcutInfo>("popup_shortcut"),
 
   hidePopup: () => invoke<void>("hide_popup"),
-  openDesktopWindow: () => invoke<void>("open_desktop_window"),
+  openDesktopWindow: (view?: string) => invoke<void>("open_desktop_window", { view }),
   hideDesktopWindow: () => invoke<void>("hide_desktop_window"),
   resizePopup: (height: number) => invoke<void>("resize_popup", { height }),
   quitApp: () => invoke<void>("quit_app"),

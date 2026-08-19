@@ -1,6 +1,6 @@
 //! Finding the Claude Code CLI and asking it about its own state.
 //!
-//! Blitzit never reads Claude credentials; it only asks the CLI whether it is
+//! Crushit never reads Claude credentials; it only asks the CLI whether it is
 //! signed in and reports the answer.
 
 use crate::agent::{self, Agent, AgentStatus};

@@ -50,16 +50,56 @@ macro_rules! string_enum {
     };
 }
 
-string_enum!(TaskCategory {
-    Frontend => "frontend",
-    Backend => "backend",
-    Database => "database",
-    Security => "security",
-    Testing => "testing",
-    DevOps => "devops",
-    Refactor => "refactor",
-    Bug => "bug",
-}, default = Backend);
+/// A task category the developer manages themselves. The slug is the stable id
+/// stored on tasks; the label and colour are theirs to change at any time.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Category {
+    pub id: i64,
+    pub slug: String,
+    pub label: String,
+    /// A hex colour, used for the dot that tells categories apart at a glance.
+    pub color: String,
+    pub position: i64,
+}
+
+/// Absent fields are left unchanged. The slug is never patched: tasks point at
+/// it, so renaming a category keeps every task that used it.
+#[derive(Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CategoryPatch {
+    pub label: Option<String>,
+    pub color: Option<String>,
+}
+
+/// The story-point scale. Fibonacci, because the gaps are the point: the
+/// difference between 8 and 13 is a real judgement, between 8 and 9 is noise.
+pub const STORY_POINTS: [i64; 6] = [1, 2, 3, 5, 8, 13];
+
+/// Snaps any number onto the scale. Zero and below mean "not estimated".
+pub fn nearest_story_points(raw: i64) -> Option<i64> {
+    if raw <= 0 {
+        return None;
+    }
+    STORY_POINTS
+        .iter()
+        .copied()
+        .min_by_key(|point| (point - raw).abs())
+}
+
+/// Turns a label into a slug that is safe to store and compare. Anything that
+/// is not a letter or digit becomes a single dash.
+pub fn slugify(label: &str) -> String {
+    let mut slug = String::with_capacity(label.len());
+    for ch in label.trim().to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.trim_matches('-').to_string()
+}
 
 string_enum!(TaskStatus {
     Backlog => "backlog",
@@ -119,10 +159,12 @@ pub struct Task {
     pub goal_id: Option<i64>,
     pub title: String,
     pub description: Option<String>,
-    pub category: TaskCategory,
+    pub category: String,
     pub status: TaskStatus,
     pub position: i64,
     pub estimate_minutes: Option<i64>,
+    /// Relative size on the Fibonacci scale, when one has been estimated.
+    pub story_points: Option<i64>,
     pub is_ai_generated: bool,
     pub created_at: i64,
     pub updated_at: i64,
@@ -142,13 +184,27 @@ pub struct NewTask {
     pub project_id: i64,
     pub title: String,
     pub description: Option<String>,
-    pub category: Option<TaskCategory>,
+    pub category: Option<String>,
     pub status: Option<TaskStatus>,
     pub estimate_minutes: Option<i64>,
+    pub story_points: Option<i64>,
     pub goal_id: Option<i64>,
     pub is_ai_generated: Option<bool>,
     pub criteria: Option<Vec<String>>,
     pub files: Option<Vec<String>>,
+}
+
+/// One finished task, as the history graph needs it: enough to draw a day and
+/// to list what was in it, without the criteria, files and focus totals a full
+/// task carries.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletedTask {
+    pub id: i64,
+    pub title: String,
+    pub category: String,
+    pub story_points: Option<i64>,
+    pub completed_at: i64,
 }
 
 /// Every field is optional: absent means "leave unchanged".
@@ -157,9 +213,10 @@ pub struct NewTask {
 pub struct TaskPatch {
     pub title: Option<String>,
     pub description: Option<String>,
-    pub category: Option<TaskCategory>,
+    pub category: Option<String>,
     pub status: Option<TaskStatus>,
     pub estimate_minutes: Option<i64>,
+    pub story_points: Option<i64>,
     pub criteria: Option<Vec<String>>,
     pub files: Option<Vec<String>>,
     pub depends_on: Option<Vec<i64>>,
@@ -225,6 +282,8 @@ pub struct Settings {
     pub theme: Theme,
     /// Announce the moments that happen while you are looking elsewhere.
     pub notifications: bool,
+    /// Sound the alarm when a session runs out or a task is finished.
+    pub sounds: bool,
     pub launch_at_login: bool,
     /// False until the first run has been walked through.
     pub onboarded: bool,
@@ -244,6 +303,7 @@ impl Default for Settings {
             claude_model: None,
             theme: Theme::Light,
             notifications: true,
+            sounds: true,
             launch_at_login: false,
             onboarded: false,
         }
@@ -264,6 +324,7 @@ pub struct SettingsPatch {
     pub claude_model: Option<Option<String>>,
     pub theme: Option<Theme>,
     pub notifications: Option<bool>,
+    pub sounds: Option<bool>,
     pub launch_at_login: Option<bool>,
     pub onboarded: Option<bool>,
 }

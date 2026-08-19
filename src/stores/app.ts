@@ -4,8 +4,10 @@ import { computed, ref } from "vue";
 import { errorMessage, ipc } from "../lib/ipc";
 import type { Project, Settings, SettingsPatch } from "../types";
 import { useAgentStore } from "./agent";
+import { useCategoriesStore } from "./categories";
 import { useExecutionStore } from "./execution";
 import { useFocusStore } from "./focus";
+import { useRestStore } from "./rest";
 import { useReviewStore } from "./review";
 import { useTasksStore } from "./tasks";
 
@@ -16,6 +18,7 @@ export type View =
   | "goal"
   | "settings"
   | "changes"
+  | "history"
   | "onboarding";
 
 const DEFAULT_SETTINGS: Settings = {
@@ -30,6 +33,7 @@ const DEFAULT_SETTINGS: Settings = {
   claudeModel: null,
   theme: "light",
   notifications: true,
+  sounds: true,
   launchAtLogin: false,
   onboarded: false,
 };
@@ -74,7 +78,9 @@ export const useAppStore = defineStore("app", () => {
       projects.value = data.projects;
       activeProject.value = data.activeProject;
       tasks.set(data.tasks);
+      useCategoriesStore().set(data.categories);
       focus.set(data.focus);
+      useRestStore().set(data.rest);
       const codex = useAgentStore();
       codex.setAnalysis(data.analysis);
       codex.setGoal(data.goal);
@@ -108,8 +114,12 @@ export const useAppStore = defineStore("app", () => {
     });
     const stopExecution = await useExecutionStore().subscribe();
     const stopReview = await useReviewStore().subscribe();
+    const stopCategories = await useCategoriesStore().subscribe();
+    const stopRest = await useRestStore().subscribe();
     return () => {
       stopTasks();
+      stopCategories();
+      stopRest();
       stopFocus();
       stopCodex();
       stopExecution();
@@ -190,6 +200,29 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  /**
+   * Re-reads what the backend says is running. These snapshots normally arrive
+   * as events; a window that was not listening when one was emitted has no
+   * other way to catch up, and would show nothing while a run is still going.
+   */
+  async function refreshRuns() {
+    const codex = useAgentStore();
+    const execution = useExecutionStore();
+    const review = useReviewStore();
+    try {
+      const [analysis, run, verification] = await Promise.all([
+        ipc.analysisSnapshot(),
+        ipc.executionSnapshot(),
+        ipc.verificationSnapshot(),
+      ]);
+      codex.setAnalysis(analysis);
+      execution.set(run);
+      review.set(verification);
+    } catch (caught) {
+      error.value = errorMessage(caught);
+    }
+  }
+
   async function updateSettings(patch: SettingsPatch) {
     try {
       error.value = null;
@@ -219,6 +252,7 @@ export const useAppStore = defineStore("app", () => {
     addProject,
     removeProject,
     refreshActiveProject,
+    refreshRuns,
     updateSettings,
   };
 });

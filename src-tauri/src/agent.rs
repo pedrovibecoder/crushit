@@ -1,4 +1,4 @@
-//! The coding agent Blitzit talks to, and the plumbing both agents share.
+//! The coding agent Crushit talks to, and the plumbing both agents share.
 //!
 //! The PRD scopes V1 to Codex; Claude Code was added on request, so the two
 //! are kept behind one small surface rather than threaded through the app.

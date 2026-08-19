@@ -102,7 +102,7 @@ fn describe_failure(result: &Value) -> String {
 pub fn run_analysis(
     binary: &Path,
     project_path: &str,
-    goal: &str,
+    request: &plan::PlanRequest,
     model: Option<&str>,
     on_event: impl FnMut(AnalysisEvent),
     cancelled: Arc<AtomicBool>,
@@ -110,7 +110,7 @@ pub fn run_analysis(
     let (text, session) = run_read_only(
         binary,
         project_path,
-        &format!("{}{}", plan::prompt(goal), plan::json_instruction()),
+        &request.spelled_out(),
         model,
         on_event,
         cancelled,
@@ -118,7 +118,7 @@ pub fn run_analysis(
          Try a more specific goal, or a faster model in Settings.",
     )?;
     Ok(AnalysisOutcome {
-        plan: plan::parse_plan(&text)?,
+        plan: request.parse(&text)?,
         thread_id: session,
     })
 }

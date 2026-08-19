@@ -2,6 +2,7 @@ use crate::analysis::{AnalysisSnapshot, AnalysisState};
 use crate::db::{self, Db};
 use crate::error::{Error, Result};
 use crate::focus::{self, FocusSnapshot, FocusStatus, FocusTimer};
+use crate::rest::{RestSnapshot, RestState};
 use crate::models::*;
 use crate::popup;
 use crate::repo;
@@ -25,7 +26,9 @@ pub struct Bootstrap {
     pub projects: Vec<Project>,
     pub active_project: Option<Project>,
     pub tasks: Vec<Task>,
+    pub categories: Vec<Category>,
     pub focus: FocusSnapshot,
+    pub rest: RestSnapshot,
     pub analysis: AnalysisSnapshot,
     pub goal: Option<Goal>,
     pub execution: ExecutionSnapshot,
@@ -50,6 +53,7 @@ fn resolve_path(raw: &str) -> Result<PathBuf> {
 pub fn bootstrap(
     db: State<'_, Db>,
     focus_state: State<'_, FocusState>,
+    rest: State<'_, RestState>,
     analysis: State<'_, AnalysisState>,
     execution: State<'_, ExecutionState>,
     verification: State<'_, VerificationState>,
@@ -77,7 +81,9 @@ pub fn bootstrap(
         projects,
         active_project,
         tasks,
+        categories: db::list_categories(&conn)?,
         focus: focus_state.timer().snapshot(),
+        rest: rest.snapshot(),
     })
 }
 
@@ -213,6 +219,68 @@ pub fn refresh_project(db: State<'_, Db>, project_id: i64) -> Result<Project> {
         repo::is_git_repo(path),
         repo::current_branch(path).as_deref(),
     )
+}
+
+// --------------------------------------------------------------- categories
+
+fn notify_categories_changed(app: &AppHandle) {
+    let _ = app.emit("categories:changed", ());
+}
+
+#[tauri::command]
+pub fn list_categories(db: State<'_, Db>) -> Result<Vec<Category>> {
+    db::list_categories(&db.conn())
+}
+
+#[tauri::command]
+pub fn create_category(
+    app: AppHandle,
+    db: State<'_, Db>,
+    label: String,
+    color: String,
+) -> Result<Vec<Category>> {
+    let conn = db.conn();
+    db::create_category(&conn, &label, &color)?;
+    let categories = db::list_categories(&conn)?;
+    drop(conn);
+    notify_categories_changed(&app);
+    Ok(categories)
+}
+
+#[tauri::command]
+pub fn update_category(
+    app: AppHandle,
+    db: State<'_, Db>,
+    category_id: i64,
+    patch: CategoryPatch,
+) -> Result<Vec<Category>> {
+    let conn = db.conn();
+    db::update_category(&conn, category_id, &patch)?;
+    let categories = db::list_categories(&conn)?;
+    drop(conn);
+    notify_categories_changed(&app);
+    Ok(categories)
+}
+
+/// Tasks filed under the deleted category move to the one left at the top, so
+/// the open task list changes too.
+#[tauri::command]
+pub fn delete_category(
+    app: AppHandle,
+    db: State<'_, Db>,
+    category_id: i64,
+) -> Result<Vec<Category>> {
+    let categories = db::delete_category(&db.conn(), category_id)?;
+    notify_categories_changed(&app);
+    notify_tasks_changed(&app);
+    Ok(categories)
+}
+
+/// Finished work for the history graph. `days` bounds how far back it reaches.
+#[tauri::command]
+pub fn completed_tasks(db: State<'_, Db>, project_id: i64, days: i64) -> Result<Vec<CompletedTask>> {
+    let days = days.clamp(1, 1830);
+    db::completed_since(&db.conn(), project_id, now() - days * 86_400)
 }
 
 // -------------------------------------------------------------------- tasks
@@ -382,6 +450,42 @@ pub fn stop_focus(
 // ----------------------------------------------------------------- settings
 
 /// A small read on how the work is going, for the desktop window.
+// -------------------------------------------------------------------- break
+
+#[tauri::command]
+pub fn rest_snapshot(rest: State<'_, RestState>) -> RestSnapshot {
+    rest.snapshot()
+}
+
+/// Starts a break. A focus session running underneath is paused rather than
+/// left counting: the point of saying you are tired is that you have stopped.
+#[tauri::command]
+pub fn start_rest(
+    app: AppHandle,
+    focus_state: State<'_, FocusState>,
+    rest: State<'_, RestState>,
+    minutes: i64,
+) -> Result<RestSnapshot> {
+    {
+        let mut timer = focus_state.timer();
+        if timer.snapshot().status == FocusStatus::Running {
+            timer.pause();
+            let _ = app.emit("focus:changed", &timer.snapshot());
+        }
+    }
+    let snapshot = rest.begin(minutes);
+    let _ = app.emit("rest:changed", &snapshot);
+    Ok(snapshot)
+}
+
+/// Ends a break, whether it ran out or was cut short.
+#[tauri::command]
+pub fn stop_rest(app: AppHandle, rest: State<'_, RestState>) -> RestSnapshot {
+    let snapshot = rest.stop();
+    let _ = app.emit("rest:changed", &snapshot);
+    snapshot
+}
+
 #[tauri::command]
 pub fn performance_stats(db: State<'_, Db>) -> Result<db::Stats> {
     db::stats(&db.conn())
@@ -430,11 +534,17 @@ pub fn hide_popup(app: AppHandle) -> Result<()> {
 
 /// Raises the desktop window — the "open in a real window" action.
 #[tauri::command]
-pub fn open_desktop_window(app: AppHandle) -> Result<()> {
+pub fn open_desktop_window(app: AppHandle, view: Option<String>) -> Result<()> {
     // Opening the window is a deliberate switch of surface, so the popup gets
     // out of the way rather than hovering over it.
     let _ = popup::hide(&app);
-    crate::desktop::show(&app)
+    crate::desktop::show(&app)?;
+    // The desktop window keeps its own idea of which screen it is on, so being
+    // sent somewhere has to be asked for rather than assumed.
+    if let Some(view) = view.filter(|view| !view.trim().is_empty()) {
+        let _ = app.emit_to(crate::desktop::WINDOW_LABEL, "desktop:navigate", view);
+    }
+    Ok(())
 }
 
 /// Returns the application to the menu bar without quitting.
@@ -542,7 +652,7 @@ fn agent_binary(db: &Db, cache: &agent::StatusCache, agent: Agent) -> Result<std
         })
 }
 
-/// Reports what Blitzit found for one agent: binary, version, sign-in state.
+/// Reports what Crushit found for one agent: binary, version, sign-in state.
 ///
 /// Served from cache unless `force` is set, because probing costs well over a
 /// second and every screen that shows agent state would otherwise pay it.
@@ -635,21 +745,82 @@ pub fn start_analysis(
         return Err(Error::invalid("an analysis is already running"));
     }
 
-    let (goal, project, chosen, model) = {
+    let (goal, project, chosen, model, categories) = {
         let conn = db.conn();
         let settings = db::get_settings(&conn)?;
         let chosen = settings.agent;
         let project = db::find_project(&conn, project_id)?.ok_or(Error::NotFound("project"))?;
         let goal = db::create_goal(&conn, project_id, &prompt, chosen)?;
         let goal = db::set_goal_status(&conn, goal.id, GoalStatus::Analyzing)?;
-        (goal, project, chosen, configured_model(&settings, chosen))
+        // The agent files its tasks under the developer's own categories, so
+        // the list it may choose from is read at the moment the run starts.
+        let categories = db::category_slugs(&conn)?;
+        (goal, project, chosen, configured_model(&settings, chosen), categories)
     };
+    let request = crate::plan::PlanRequest::goal(&goal.prompt, categories);
     let binary = agent_binary(&db, &cache, chosen)?;
 
     let snapshot = analysis.begin(goal.id, project_id, goal.title.clone());
     let _ = app.emit("codex:analysis", &snapshot);
 
-    spawn_analysis_worker(app, goal.clone(), project.path, chosen, binary, model);
+    spawn_analysis_worker(app, goal.clone(), project.path, chosen, binary, model, request);
+    Ok(goal)
+}
+
+/// Turns a file dropped on the window into a plan waiting to be accepted.
+///
+/// This is the same machinery as `start_analysis` — one read-only agent turn
+/// producing a plan — pointed at a staged copy of the dropped file instead of
+/// at the repository.
+#[tauri::command]
+pub fn import_tasks(
+    app: AppHandle,
+    db: State<'_, Db>,
+    cache: State<'_, agent::StatusCache>,
+    analysis: State<'_, AnalysisState>,
+    project_id: i64,
+    path: String,
+) -> Result<Goal> {
+    if analysis.is_running() {
+        return Err(Error::invalid("an analysis is already running"));
+    }
+
+    let source = PathBuf::from(&path);
+    let name = crate::import::display_name(&source);
+    let staged = crate::import::stage(
+        &source,
+        &app.path()
+            .app_data_dir()
+            .map_err(|_| Error::invalid("could not find somewhere to stage the file"))?,
+    )?;
+    // The turn is rooted at the staging directory, which holds the copy and
+    // nothing else, so a read-only agent can reach the file and no further.
+    let work_dir = staged
+        .parent()
+        .ok_or_else(|| Error::invalid("could not stage that file"))?
+        .to_string_lossy()
+        .to_string();
+
+    let (goal, chosen, model, categories) = {
+        let conn = db.conn();
+        let settings = db::get_settings(&conn)?;
+        let chosen = settings.agent;
+        db::find_project(&conn, project_id)?.ok_or(Error::NotFound("project"))?;
+        let goal = db::create_goal(&conn, project_id, &format!("Import tasks from {name}"), chosen)?;
+        let goal = db::set_goal_status(&conn, goal.id, GoalStatus::Analyzing)?;
+        let categories = db::category_slugs(&conn)?;
+        (goal, chosen, configured_model(&settings, chosen), categories)
+    };
+    let binary = agent_binary(&db, &cache, chosen)?;
+    let request = crate::import::request(
+        &staged.file_name().unwrap_or_default().to_string_lossy(),
+        categories,
+    );
+
+    let snapshot = analysis.begin(goal.id, project_id, goal.title.clone());
+    let _ = app.emit("codex:analysis", &snapshot);
+
+    spawn_analysis_worker(app, goal.clone(), work_dir, chosen, binary, model, request);
     Ok(goal)
 }
 
@@ -660,6 +831,7 @@ fn spawn_analysis_worker(
     chosen: Agent,
     binary: std::path::PathBuf,
     model: Option<String>,
+    request: crate::plan::PlanRequest,
 ) {
     std::thread::spawn(move || {
         let analysis = app.state::<AnalysisState>();
@@ -691,7 +863,7 @@ fn spawn_analysis_worker(
                     crate::codex::planning::run_analysis(
                         &client,
                         &project_path,
-                        &goal.prompt,
+                        &request,
                         model.as_deref(),
                         &mut on_event,
                         is_cancelled,
@@ -701,7 +873,7 @@ fn spawn_analysis_worker(
             Agent::ClaudeCode => crate::claude::planning::run_analysis(
                 &binary,
                 &project_path,
-                &goal.prompt,
+                &request,
                 model.as_deref(),
                 &mut on_event,
                 cancel_flag,
@@ -1102,6 +1274,65 @@ pub fn verification_snapshot(state: State<'_, VerificationState>) -> Verificatio
 }
 
 /// Checks the work against the task's criteria. Read-only, like planning.
+/// Asks the agent for acceptance criteria for a task written by hand.
+///
+/// Blocking, unlike the other agent work: it is one short read-only question,
+/// and the screen that asked has nothing to show until the answer arrives.
+#[tauri::command]
+pub async fn suggest_criteria(
+    app: AppHandle,
+    db: State<'_, Db>,
+    cache: State<'_, agent::StatusCache>,
+    task_id: i64,
+) -> Result<Vec<String>> {
+    let (task, project, chosen, model) = {
+        let conn = db.conn();
+        let settings = db::get_settings(&conn)?;
+        let task = db::get_task(&conn, task_id)?;
+        let project =
+            db::find_project(&conn, task.project_id)?.ok_or(Error::NotFound("project"))?;
+        (
+            task,
+            project,
+            settings.agent,
+            configured_model(&settings, settings.agent),
+        )
+    };
+    let binary = agent_binary(&db, &cache, chosen)?;
+
+    let answer = match chosen {
+        Agent::Codex => {
+            let client = app.state::<CodexClient>();
+            client.ensure_started(&binary, &app.package_info().version.to_string())?;
+            crate::codex::planning::run_read_only_turn(
+                &client,
+                &project.path,
+                &crate::criteria::prompt(&task),
+                crate::criteria::output_schema(),
+                model.as_deref(),
+                |_| {},
+                || false,
+                "Codex took too long to suggest acceptance criteria.",
+            )
+        }
+        Agent::ClaudeCode => crate::claude::planning::run_read_only(
+            &binary,
+            &project.path,
+            &format!(
+                "{}{}",
+                crate::criteria::prompt(&task),
+                crate::criteria::json_instruction()
+            ),
+            model.as_deref(),
+            |_| {},
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            "Claude Code took too long to suggest acceptance criteria.",
+        ),
+    };
+
+    crate::criteria::parse(&answer?.0)
+}
+
 #[tauri::command]
 pub fn start_verification(
     app: AppHandle,

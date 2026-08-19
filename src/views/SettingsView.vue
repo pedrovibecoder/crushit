@@ -10,9 +10,11 @@ import { SHORTCUTS } from "../lib/shortcuts";
 import { shortenPath } from "../lib/format";
 import { useAgentStore } from "../stores/agent";
 import { useAppStore } from "../stores/app";
+import { useCategoriesStore } from "../stores/categories";
 import {
   AGENTS,
   AGENT_LABELS,
+  CATEGORY_COLORS,
   THEMES,
   THEME_LABELS,
   type Agent,
@@ -22,6 +24,7 @@ import {
 
 const app = useAppStore();
 const agents = useAgentStore();
+const categories = useCategoriesStore();
 
 const FOCUS_PRESETS = [15, 25, 45, 60];
 
@@ -85,6 +88,38 @@ async function chooseModel(value: string) {
   );
 }
 
+const newCategory = ref("");
+/** Which row has its palette open; only one at a time keeps the list short. */
+const recolouring = ref<number | null>(null);
+
+/** The next colour a new category gets, so a fresh list is not all one shade. */
+const nextColor = computed(
+  () => CATEGORY_COLORS[categories.categories.length % CATEGORY_COLORS.length],
+);
+
+async function addCategory() {
+  const label = newCategory.value.trim();
+  if (!label) return;
+  if (await categories.create(label, nextColor.value)) newCategory.value = "";
+}
+
+async function renameCategory(id: number, event: Event) {
+  const input = event.target as HTMLInputElement;
+  const label = input.value.trim();
+  const current = categories.categories.find((category) => category.id === id);
+  if (!current) return;
+  if (!label || label === current.label) {
+    input.value = current.label;
+    return;
+  }
+  await categories.update(id, { label });
+}
+
+async function recolour(id: number, color: string) {
+  recolouring.value = null;
+  await categories.update(id, { color });
+}
+
 async function reveal() {
   if (!app.activeProject) return;
   try {
@@ -97,7 +132,7 @@ async function reveal() {
 
 <template>
   <div class="flex flex-col">
-    <PanelHeader eyebrow="Blitzit" title="Settings" back @back="app.back()" />
+    <PanelHeader eyebrow="Crushit" title="Settings" back @back="app.back()" />
 
     <div class="panel-scroll px-3.5 pb-3.5">
       <section>
@@ -141,6 +176,84 @@ async function reveal() {
         <button v-else class="btn btn-ghost mt-1.5 w-full py-2" @click="app.go('projects')">
           Choose a project
         </button>
+      </section>
+
+      <section class="mt-4">
+        <h2 class="eyebrow">Categories</h2>
+        <p class="mt-1 text-[11px] leading-relaxed text-ink-2">
+          What tasks are filed under, here and in the plans your agent writes.
+        </p>
+
+        <ul class="mt-1.5 space-y-1">
+          <li
+            v-for="category in categories.categories"
+            :key="category.id"
+            class="card px-2 py-1.5"
+          >
+            <div class="flex items-center gap-2">
+              <button
+                class="h-[18px] w-[18px] shrink-0 rounded-full border border-line"
+                :style="{ backgroundColor: category.color }"
+                :aria-label="`Change the colour of ${category.label}`"
+                :title="`Change the colour of ${category.label}`"
+                @click="recolouring = recolouring === category.id ? null : category.id"
+              />
+              <input
+                :value="category.label"
+                class="min-w-0 flex-1 rounded-[6px] border border-transparent bg-transparent px-1 py-0.5 text-[12.5px] font-semibold outline-none hover:border-line focus:border-ink-3"
+                :aria-label="`Rename ${category.label}`"
+                @blur="renameCategory(category.id, $event)"
+                @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
+              />
+              <button
+                v-if="categories.categories.length > 1"
+                class="shrink-0 text-ink-3 transition-colors hover:text-danger"
+                :aria-label="`Delete ${category.label}`"
+                :title="`Delete ${category.label} — its tasks move to ${categories.categories[0].label}`"
+                @click="categories.remove(category.id)"
+              >
+                <AppIcon name="close" :size="12" />
+              </button>
+            </div>
+
+            <div v-if="recolouring === category.id" class="mt-1.5 flex flex-wrap gap-1 pl-[26px]">
+              <button
+                v-for="color in CATEGORY_COLORS"
+                :key="color"
+                class="h-[18px] w-[18px] rounded-full border transition-transform hover:scale-110"
+                :class="color === category.color ? 'border-ink' : 'border-line'"
+                :style="{ backgroundColor: color }"
+                :aria-label="`Use this colour for ${category.label}`"
+                @click="recolour(category.id, color)"
+              />
+            </div>
+          </li>
+        </ul>
+
+        <div class="mt-1.5 flex gap-1.5">
+          <span
+            class="mt-[7px] h-[18px] w-[18px] shrink-0 rounded-full border border-line"
+            :style="{ backgroundColor: nextColor }"
+          />
+          <input
+            v-model="newCategory"
+            type="text"
+            placeholder="Add a category…"
+            aria-label="New category name"
+            class="field min-w-0 flex-1 px-2 py-1.5 text-[11.5px]"
+            @keydown.enter.prevent="addCategory"
+          />
+          <button
+            class="btn btn-dark shrink-0 px-2.5 py-1.5 text-[11.5px]"
+            :disabled="!newCategory.trim()"
+            @click="addCategory"
+          >
+            Add
+          </button>
+        </div>
+        <p v-if="categories.error" class="mt-1.5 text-[11px] text-danger">
+          {{ categories.error }}
+        </p>
       </section>
 
       <section class="mt-4">
@@ -331,9 +444,15 @@ async function reveal() {
             @update:model-value="app.updateSettings({ notifications: $event })"
           />
           <ToggleSwitch
+            :model-value="app.settings.sounds"
+            label="Sound the alarm"
+            hint="When a session runs out, a run finishes, or a task is done"
+            @update:model-value="app.updateSettings({ sounds: $event })"
+          />
+          <ToggleSwitch
             :model-value="app.settings.launchAtLogin"
             label="Launch at login"
-            hint="Blitzit starts in the menu bar when you log in"
+            hint="Crushit starts in the menu bar when you log in"
             @update:model-value="app.updateSettings({ launchAtLogin: $event })"
           />
         </div>
@@ -383,7 +502,7 @@ async function reveal() {
           class="btn btn-ghost mt-2 w-full py-2 text-ink-2 hover:text-danger"
           @click="ipc.quitApp()"
         >
-          Quit Blitzit
+          Quit Crushit
         </button>
       </section>
     </div>

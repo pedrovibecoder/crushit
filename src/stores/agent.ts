@@ -90,6 +90,18 @@ export const useAgentStore = defineStore("agent", () => {
     }
   }
 
+  /** A dropped file becomes a plan through the same review screen. */
+  async function importFrom(projectId: number, path: string) {
+    try {
+      error.value = null;
+      goal.value = await ipc.importTasks(projectId, path);
+      return true;
+    } catch (caught) {
+      error.value = errorMessage(caught);
+      return false;
+    }
+  }
+
   async function cancel(projectId: number | null) {
     try {
       analysis.value = await ipc.cancelAnalysis();
@@ -151,6 +163,7 @@ export const useAgentStore = defineStore("agent", () => {
     loadModels,
     refreshGoal,
     analyze,
+    importFrom,
     cancel,
     accept,
     discard,

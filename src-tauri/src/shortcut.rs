@@ -79,7 +79,7 @@ pub fn register(app: &AppHandle) {
     }
 
     let problem = last_error.unwrap_or_else(|| "no shortcut could be registered".to_string());
-    eprintln!("blitzit: no popup shortcut could be registered: {problem}");
+    eprintln!("crushit: no popup shortcut could be registered: {problem}");
     state.set(ShortcutInfo { combo: None, problem: Some(problem) });
 }
 

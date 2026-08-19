@@ -1,12 +1,12 @@
 [package]
-name = "blitzit"
+name = "crushit"
 version = "0.1.0"
 description = "AI Developer Taskbar"
 authors = ["cleonart"]
 edition = "2021"
 
 [lib]
-name = "blitzit_lib"
+name = "crushit_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

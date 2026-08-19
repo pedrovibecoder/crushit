@@ -116,7 +116,7 @@ pub fn short(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AcceptanceCriterion, TaskCategory, TaskStatus};
+    use crate::models::{AcceptanceCriterion, TaskStatus};
 
     fn a_task() -> Task {
         Task {
@@ -125,7 +125,8 @@ mod tests {
             goal_id: None,
             title: "Create invoice PDF service".into(),
             description: Some("Render an invoice to a PDF buffer.".into()),
-            category: TaskCategory::Backend,
+            category: "task".into(),
+            story_points: Some(3),
             status: TaskStatus::InProgress,
             position: 0,
             estimate_minutes: Some(45),

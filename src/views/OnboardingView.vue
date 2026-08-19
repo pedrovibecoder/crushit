@@ -53,13 +53,13 @@ async function finish() {
 
 <template>
   <div class="flex flex-col">
-    <PanelHeader eyebrow="Welcome" title="Set up Blitzit" />
+    <PanelHeader eyebrow="Welcome" title="Set up Crushit" />
 
     <div class="panel-scroll px-3.5 pb-3.5">
       <!-- Step one: the repository everything else hangs off. -->
       <template v-if="step === 'project'">
         <p class="text-[12.5px] leading-relaxed text-ink-2">
-          Blitzit works against one local repository at a time. Pick the project
+          Crushit works against one local repository at a time. Pick the project
           you want to plan and build in — you can change it later.
         </p>
         <button

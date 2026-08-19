@@ -3,9 +3,14 @@
 //! Ignored by default: these spawn the CLI and spend account quota.
 //! Run with `cargo test --test claude_live -- --ignored --nocapture`.
 
-use blitzit_lib::agent;
-use blitzit_lib::claude::{detect, planning};
-use blitzit_lib::plan::AnalysisEvent;
+use crushit_lib::agent;
+use crushit_lib::claude::{detect, planning};
+use crushit_lib::plan::{self, AnalysisEvent};
+
+/// The categories a freshly migrated database hands the planner.
+fn categories() -> Vec<String> {
+    vec!["task".to_string(), "bug".to_string()]
+}
 
 #[test]
 #[ignore = "runs the real claude CLI"]
@@ -42,7 +47,7 @@ fn a_planning_run_produces_a_usable_plan() {
     let outcome = planning::run_analysis(
         &binary,
         &fixture,
-        &goal,
+        &plan::PlanRequest::goal(&goal, categories()),
         Some(&model),
         |event| {
             if let AnalysisEvent::StepStarted { label, .. } = event {
@@ -100,9 +105,9 @@ fn a_planning_run_produces_a_usable_plan() {
 #[test]
 #[ignore = "runs the real claude CLI, writes to BLITZIT_FIXTURE, and spends quota"]
 fn a_task_run_edits_the_repository_and_reports_what_it_touched() {
-    use blitzit_lib::claude::execution;
-    use blitzit_lib::models::{AcceptanceCriterion, Task, TaskCategory, TaskStatus};
-    use blitzit_lib::run::RunEvent;
+    use crushit_lib::claude::execution;
+    use crushit_lib::models::{AcceptanceCriterion, Task, TaskStatus};
+    use crushit_lib::run::RunEvent;
 
     let binary = detect::find_binary(None).expect("claude on this machine");
     let fixture = std::env::var("BLITZIT_FIXTURE").expect("set BLITZIT_FIXTURE to a repo path");
@@ -113,7 +118,8 @@ fn a_task_run_edits_the_repository_and_reports_what_it_touched() {
         goal_id: None,
         title: "Add a health check route".into(),
         description: Some("Expose GET /health returning {\"status\":\"ok\"}.".into()),
-        category: TaskCategory::Backend,
+        category: "task".into(),
+        story_points: Some(3),
         status: TaskStatus::InProgress,
         position: 0,
         estimate_minutes: Some(10),
@@ -183,7 +189,7 @@ fn a_task_run_edits_the_repository_and_reports_what_it_touched() {
 #[test]
 #[ignore = "runs the real claude CLI and cancels it"]
 fn cancelling_stops_the_run_promptly_even_while_the_agent_is_quiet() {
-    use blitzit_lib::claude::planning;
+    use crushit_lib::claude::planning;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -205,7 +211,10 @@ fn cancelling_stops_the_run_promptly_even_while_the_agent_is_quiet() {
     let outcome = planning::run_analysis(
         &binary,
         &fixture,
-        "Rewrite this service to be event driven, and explain every trade-off in detail.",
+        &plan::PlanRequest::goal(
+            "Rewrite this service to be event driven, and explain every trade-off in detail.",
+            categories(),
+        ),
         Some("sonnet"),
         |_| {},
         cancelled,
@@ -223,9 +232,9 @@ fn cancelling_stops_the_run_promptly_even_while_the_agent_is_quiet() {
 #[test]
 #[ignore = "runs the real claude CLI and spends quota"]
 fn verification_judges_each_criterion_on_the_code_that_is_there() {
-    use blitzit_lib::claude::planning;
-    use blitzit_lib::models::{AcceptanceCriterion, Task, TaskCategory, TaskStatus};
-    use blitzit_lib::verify;
+    use crushit_lib::claude::planning;
+    use crushit_lib::models::{AcceptanceCriterion, Task, TaskStatus};
+    use crushit_lib::verify;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
@@ -243,7 +252,8 @@ fn verification_judges_each_criterion_on_the_code_that_is_there() {
         goal_id: None,
         title: "Invoice endpoint".into(),
         description: None,
-        category: TaskCategory::Backend,
+        category: "task".into(),
+        story_points: Some(3),
         status: TaskStatus::NeedsReview,
         position: 0,
         estimate_minutes: None,

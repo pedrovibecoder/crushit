@@ -25,7 +25,7 @@ pub struct Notification {
 
 /// Synthesised when the server asks permission, so a run loop can react to it
 /// exactly like any other event.
-pub const APPROVAL_REQUESTED: &str = "blitzit/approvalRequested";
+pub const APPROVAL_REQUESTED: &str = "crushit/approvalRequested";
 
 /// A permission request waiting on a human.
 #[derive(Clone, Debug)]
@@ -151,8 +151,8 @@ impl CodexClient {
             "initialize",
             json!({
                 "clientInfo": {
-                    "name": "blitzit",
-                    "title": "Blitzit",
+                    "name": "crushit",
+                    "title": "Crushit",
                     "version": client_version,
                 }
             }),
@@ -405,7 +405,7 @@ fn answer_server_request(id: i64, method: &str) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": id,
-        "error": { "code": -32601, "message": format!("blitzit does not handle {method}") },
+        "error": { "code": -32601, "message": format!("crushit does not handle {method}") },
     })
 }
 

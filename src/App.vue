@@ -5,9 +5,11 @@ import DesktopShell from "./components/DesktopShell.vue";
 import PopupShell from "./components/PopupShell.vue";
 import { ipc } from "./lib/ipc";
 import { isTyping, match } from "./lib/shortcuts";
-import { useAppStore } from "./stores/app";
+import { chime } from "./lib/sound";
+import { useAppStore, type View } from "./stores/app";
 import { useTasksStore } from "./stores/tasks";
 import ChangesView from "./views/ChangesView.vue";
+import HistoryView from "./views/HistoryView.vue";
 import GoalView from "./views/GoalView.vue";
 import OnboardingView from "./views/OnboardingView.vue";
 import ProjectsView from "./views/ProjectsView.vue";
@@ -41,6 +43,7 @@ const VIEWS = {
   goal: GoalView,
   settings: SettingsView,
   changes: ChangesView,
+  history: HistoryView,
   onboarding: OnboardingView,
 };
 
@@ -81,6 +84,22 @@ function onKeydown(event: KeyboardEvent) {
   } else app.go(shortcut.action);
 }
 
+/**
+ * Both windows run this app, so a sound has to come from one of them and the
+ * hidden surface stays quiet. This is only for the small in-app sounds: the
+ * alarm at the end of a session is played by the backend, because that is
+ * exactly when every window is hidden and a suspended webview plays nothing.
+ */
+async function sound(play: () => void) {
+  if (!app.settings.sounds) return;
+  try {
+    if (await getCurrentWindow().isVisible()) play();
+  } catch {
+    // Outside Tauri there is only one surface, so just play it.
+    play();
+  }
+}
+
 // The celebration clears itself; the confetti is over well before then.
 const CELEBRATION_MS = 3200;
 let celebrationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -90,6 +109,7 @@ watch(
   (at) => {
     clearTimeout(celebrationTimer);
     if (at === undefined) return;
+    void sound(chime);
     celebrationTimer = setTimeout(() => tasks.clearCelebration(), CELEBRATION_MS);
   },
 );
@@ -108,6 +128,17 @@ onMounted(async () => {
 
   window.addEventListener("keydown", onKeydown);
   teardown.push(() => window.removeEventListener("keydown", onKeydown));
+
+  try {
+    const { listen } = await import("@tauri-apps/api/event");
+    teardown.push(
+      await listen<string>("desktop:navigate", (event) => {
+        if (event.payload in VIEWS) app.go(event.payload as View);
+      }),
+    );
+  } catch {
+    // Only the desktop window is ever sent anywhere.
+  }
 
   try {
     const unlisten = await getCurrentWindow().onFocusChanged(({ payload }) => {

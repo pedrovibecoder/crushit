@@ -1,15 +1,18 @@
 <script setup lang="ts">
-import { CATEGORY_DOTS, CATEGORY_LABELS, type TaskCategory } from "../types";
+import { useCategoriesStore } from "../stores/categories";
+import type { TaskCategory } from "../types";
 
 defineProps<{ category: TaskCategory }>();
+
+const categories = useCategoriesStore();
 </script>
 
 <template>
   <span class="chip text-ink-2">
     <span
       class="h-[6px] w-[6px] shrink-0 rounded-full"
-      :style="{ backgroundColor: CATEGORY_DOTS[category] }"
+      :style="{ backgroundColor: categories.colorFor(category) }"
     />
-    {{ CATEGORY_LABELS[category] }}
+    {{ categories.labelFor(category) }}
   </span>
 </template>

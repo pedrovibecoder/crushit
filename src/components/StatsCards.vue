@@ -16,6 +16,9 @@ async function load() {
 
 onMounted(load);
 
+// Today's screen offers a refresh, and these are the figures that go stale.
+defineExpose({ reload: load });
+
 // Finishing a task or a session changes these numbers, so re-read them then
 // rather than leaving stale figures on screen.
 watch(() => [tasks.progress.done, focus.snapshot.status], load);

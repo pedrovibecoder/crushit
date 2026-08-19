@@ -1,7 +1,7 @@
 //! Change detection against a real repository built for the test. No agent and
 //! no network, so this runs with the normal suite.
 
-use blitzit_lib::repo;
+use crushit_lib::repo;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -17,7 +17,7 @@ fn git(dir: &Path, args: &[&str]) {
 
 /// A repository with one commit, in a directory unique to this test.
 fn a_repository(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("blitzit-repo-test-{name}"));
+    let dir = std::env::temp_dir().join(format!("crushit-repo-test-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("src")).unwrap();
     std::fs::write(dir.join("src/kept.txt"), "one\ntwo\nthree\n").unwrap();
@@ -103,7 +103,7 @@ fn an_untracked_file_is_shown_as_all_additions() {
 
 #[test]
 fn a_directory_without_git_is_reported_rather_than_erroring() {
-    let dir = std::env::temp_dir().join("blitzit-repo-test-nogit");
+    let dir = std::env::temp_dir().join("crushit-repo-test-nogit");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let changes = repo::changes(&dir);

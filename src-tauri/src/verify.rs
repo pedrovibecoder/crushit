@@ -295,7 +295,7 @@ impl VerificationState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{AcceptanceCriterion, TaskCategory, TaskStatus};
+    use crate::models::{AcceptanceCriterion, TaskStatus};
 
     fn a_task(criteria: &[&str]) -> Task {
         Task {
@@ -304,7 +304,8 @@ mod tests {
             goal_id: None,
             title: "Create invoice PDF service".into(),
             description: None,
-            category: TaskCategory::Backend,
+            category: "task".into(),
+            story_points: Some(3),
             status: TaskStatus::NeedsReview,
             position: 0,
             estimate_minutes: None,

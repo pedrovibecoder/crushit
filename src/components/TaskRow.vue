@@ -56,13 +56,16 @@ const trailing = computed(() => {
 
     <div class="min-w-0 flex-1">
       <p
-        class="line-clamp-2 text-[13px] leading-snug font-semibold"
+        class="line-clamp-2 text-[13px] leading-snug font-semibold break-words"
         :class="isDone && 'text-ink-3 line-through'"
       >
         {{ task.title }}
       </p>
       <div class="mt-1.5 flex flex-wrap items-center gap-1">
         <CategoryPill :category="task.category" />
+        <span v-if="task.storyPoints" class="chip tnum text-ink-2" title="Story points">
+          {{ task.storyPoints }} SP
+        </span>
         <span v-if="task.criteria.length" class="chip tnum text-ink-2">
           {{ metCriteria }}/{{ task.criteria.length }}
         </span>

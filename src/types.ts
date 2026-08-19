@@ -1,12 +1,22 @@
-export type TaskCategory =
-  | "frontend"
-  | "backend"
-  | "database"
-  | "security"
-  | "testing"
-  | "devops"
-  | "refactor"
-  | "bug";
+/**
+ * A category slug. Categories are rows the developer manages in Settings, so
+ * this is any string the backend knows about rather than a fixed union.
+ */
+export type TaskCategory = string;
+
+export interface Category {
+  id: number;
+  slug: TaskCategory;
+  label: string;
+  /** Hex colour for the dot that tells categories apart at small sizes. */
+  color: string;
+  position: number;
+}
+
+export interface CategoryPatch {
+  label?: string;
+  color?: string;
+}
 
 export type TaskStatus =
   | "backlog"
@@ -56,6 +66,8 @@ export interface Task {
   status: TaskStatus;
   position: number;
   estimateMinutes: number | null;
+  /** Relative size on the Fibonacci scale, when one has been estimated. */
+  storyPoints: number | null;
   isAiGenerated: boolean;
   createdAt: number;
   updatedAt: number;
@@ -67,6 +79,15 @@ export interface Task {
   focusSessions: number;
 }
 
+/** One finished task, as the history graph needs it. */
+export interface CompletedTask {
+  id: number;
+  title: string;
+  category: TaskCategory;
+  storyPoints: number | null;
+  completedAt: number;
+}
+
 export interface NewTask {
   projectId: number;
   title: string;
@@ -74,6 +95,7 @@ export interface NewTask {
   category?: TaskCategory;
   status?: TaskStatus;
   estimateMinutes?: number | null;
+  storyPoints?: number | null;
   criteria?: string[];
   files?: string[];
 }
@@ -84,6 +106,7 @@ export interface TaskPatch {
   category?: TaskCategory;
   status?: TaskStatus;
   estimateMinutes?: number;
+  storyPoints?: number;
   criteria?: string[];
   files?: string[];
   dependsOn?: number[];
@@ -98,6 +121,19 @@ export interface FocusSnapshot {
   remainingSeconds: number;
 }
 
+export type RestStatus = "idle" | "running" | "finished";
+
+export interface RestSnapshot {
+  status: RestStatus;
+  minutes: number;
+  durationSeconds: number;
+  elapsedSeconds: number;
+  remainingSeconds: number;
+}
+
+/** What a break may be set to, matching the backend's own list. */
+export const REST_CHOICES = [5, 10, 20, 30] as const;
+
 export interface Settings {
   focusMinutes: number;
   showTimerInMenuBar: boolean;
@@ -110,6 +146,7 @@ export interface Settings {
   claudeModel: string | null;
   theme: Theme;
   notifications: boolean;
+  sounds: boolean;
   launchAtLogin: boolean;
   onboarded: boolean;
 }
@@ -126,6 +163,7 @@ export interface SettingsPatch {
   claudeModel?: string | null;
   theme?: Theme;
   notifications?: boolean;
+  sounds?: boolean;
   launchAtLogin?: boolean;
   onboarded?: boolean;
 }
@@ -147,6 +185,8 @@ export interface PlannedTask {
   /** 1-based positions of earlier tasks in the same plan. */
   dependsOn: number[];
   estimateMinutes: number;
+  /** Relative size on the Fibonacci scale; 0 when the agent gave none. */
+  storyPoints: number;
 }
 
 export interface Plan {
@@ -307,49 +347,51 @@ export interface Bootstrap {
   projects: Project[];
   activeProject: Project | null;
   tasks: Task[];
+  categories: Category[];
   focus: FocusSnapshot;
+  rest: RestSnapshot;
   analysis: AnalysisSnapshot;
   goal: Goal | null;
   execution: ExecutionSnapshot;
   verification: VerificationSnapshot;
 }
 
-export const TASK_CATEGORIES: TaskCategory[] = [
-  "frontend",
-  "backend",
-  "database",
-  "security",
-  "testing",
-  "devops",
-  "refactor",
-  "bug",
+/**
+ * What a new category can be coloured. Fixed hexes rather than CSS variables:
+ * the palette is now data the developer owns, so it has to survive in the
+ * database and read the same in both themes.
+ */
+/**
+ * The story-point scale. Fibonacci, because the gaps are the point: the
+ * difference between 8 and 13 is a real judgement, between 8 and 9 is noise.
+ */
+export const STORY_POINTS = [1, 2, 3, 5, 8, 13] as const;
+
+/** The file types that can be dropped on the window to become tasks. */
+export const IMPORTABLE_EXTENSIONS = [
+  "png", "jpg", "jpeg", "gif", "webp", "heic",
+  "csv", "tsv", "xlsx", "xls", "numbers",
+  "md", "txt", "json",
 ];
 
-export const CATEGORY_LABELS: Record<TaskCategory, string> = {
-  frontend: "Frontend",
-  backend: "Backend",
-  database: "Database",
-  security: "Security",
-  testing: "Testing",
-  devops: "DevOps",
-  refactor: "Refactor",
-  bug: "Bug",
-};
+export function isImportable(path: string): boolean {
+  const extension = path.split(".").pop()?.toLowerCase() ?? "";
+  return IMPORTABLE_EXTENSIONS.includes(extension);
+}
 
-/**
- * A single dot of colour is enough to tell categories apart at small sizes.
- * These resolve through CSS variables so the palette follows the theme.
- */
-export const CATEGORY_DOTS: Record<TaskCategory, string> = {
-  frontend: "var(--color-cat-frontend)",
-  backend: "var(--color-cat-backend)",
-  database: "var(--color-cat-database)",
-  security: "var(--color-cat-security)",
-  testing: "var(--color-cat-testing)",
-  devops: "var(--color-cat-devops)",
-  refactor: "var(--color-cat-refactor)",
-  bug: "var(--color-cat-bug)",
-};
+export const CATEGORY_COLORS = [
+  "#4a9bf5",
+  "#7b61ff",
+  "#3fbf6a",
+  "#e05656",
+  "#e2a32c",
+  "#20b1c4",
+  "#8a8f9a",
+  "#e0609b",
+] as const;
+
+/** Falls back for a task filed under a category that no longer exists. */
+export const UNKNOWN_CATEGORY_COLOR = "#8a8f9a";
 
 export type Theme = "light" | "github-dark";
 

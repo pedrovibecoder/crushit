@@ -3,19 +3,23 @@ mod analysis;
 pub mod claude;
 pub mod codex;
 mod commands;
+pub mod criteria;
 mod db;
 pub mod desktop;
 mod error;
 pub mod execution;
 mod focus;
+pub mod import;
 pub mod models;
 mod notify;
 pub mod plan;
 mod popup;
+pub mod rest;
 pub mod run;
 pub mod verify;
 pub mod repo;
 mod shortcut;
+mod sound;
 mod tray;
 
 use analysis::AnalysisState;
@@ -76,6 +80,11 @@ pub fn run() {
             commands::set_active_project,
             commands::remove_project,
             commands::refresh_project,
+            commands::list_categories,
+            commands::create_category,
+            commands::update_category,
+            commands::delete_category,
+            commands::completed_tasks,
             commands::list_tasks,
             commands::create_task,
             commands::update_task,
@@ -83,6 +92,9 @@ pub fn run() {
             commands::reorder_tasks,
             commands::set_criterion_met,
             commands::focus_snapshot,
+            commands::rest_snapshot,
+            commands::start_rest,
+            commands::stop_rest,
             commands::start_focus,
             commands::pause_focus,
             commands::resume_focus,
@@ -102,6 +114,7 @@ pub fn run() {
             commands::latest_goal,
             commands::analysis_snapshot,
             commands::start_analysis,
+            commands::import_tasks,
             commands::cancel_analysis,
             commands::accept_plan,
             commands::discard_plan,
@@ -110,6 +123,7 @@ pub fn run() {
             commands::repo_changes,
             commands::file_diff,
             commands::verification_snapshot,
+            commands::suggest_criteria,
             commands::start_verification,
             commands::cancel_verification,
             commands::start_execution,
@@ -123,6 +137,8 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             let data_dir = app.path().app_data_dir()?;
+            // Still the old name: renaming the app must not lose the projects
+            // and tasks already in it.
             let database = Db::open(&data_dir.join("blitzit.sqlite3"))?;
 
             let mut timer = FocusTimer::default();
@@ -131,6 +147,7 @@ pub fn run() {
             app.manage(database);
             app.manage(FocusState(Mutex::new(timer)));
             app.manage(popup::PopupAnchor::default());
+            app.manage(rest::RestState::default());
             app.manage(CodexClient::default());
             app.manage(AnalysisState::default());
             app.manage(shortcut::ShortcutState::default());
@@ -174,7 +191,7 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("failed to start Blitzit");
+        .expect("failed to start Crushit");
 
     app.run(|_app, event| {
         if let RunEvent::Exit = event {
@@ -201,14 +218,14 @@ fn should_hide_on_blur(app: &AppHandle) -> bool {
 }
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Open Blitzit", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Blitzit", true, Some("CmdOrCtrl+Q"))?;
+    let open = MenuItem::with_id(app, "open", "Open Crushit", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Crushit", true, Some("CmdOrCtrl+Q"))?;
     let menu = Menu::with_items(app, &[&open, &PredefinedMenuItem::separator(app)?, &quit])?;
 
     let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray.png"))?;
     let builder = TrayIconBuilder::with_id(tray::TRAY_ID)
         .icon(icon)
-        .tooltip("Blitzit")
+        .tooltip("Crushit")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -284,6 +301,19 @@ fn menu_bar_state(
         return MenuBarState::AwaitingApproval;
     }
 
+    // A break outranks the rest: while it is running there is nothing else the
+    // menu bar could usefully say, and the countdown is the point of taking it.
+    if show_timer {
+        if let Some(rest) = app.try_state::<rest::RestState>() {
+            let resting = rest.snapshot();
+            if resting.status == rest::RestStatus::Running {
+                return MenuBarState::Rest {
+                    remaining_seconds: resting.remaining_seconds,
+                };
+            }
+        }
+    }
+
     // Otherwise a focus session is the developer's own clock and comes first.
     let working = app
         .try_state::<AnalysisState>()
@@ -317,6 +347,7 @@ fn menu_bar_state(
 fn spawn_timer_thread(app: AppHandle) {
     std::thread::spawn(move || {
         let mut last_snapshot: Option<FocusSnapshot> = None;
+        let mut last_rest: Option<rest::RestSnapshot> = None;
         let mut last_state: Option<MenuBarState> = None;
         let mut finished_at: Option<Instant> = None;
         let mut last_persist = Instant::now();
@@ -348,9 +379,26 @@ fn spawn_timer_thread(app: AppHandle) {
                 let _ = app.emit("verification:changed", &stalled);
             }
 
+            // A break runs on the same clock as everything else, and its
+            // countdown is emitted the same way: only when it has moved.
+            let rest_state = app.state::<rest::RestState>();
+            if let Some(rested) = rest_state.finish_if_over() {
+                let _ = app.emit("rest:changed", &rested);
+                notify::send(&app, notify::Event::BreakFinished);
+                sound::alarm(&app);
+                last_rest = Some(rested);
+            } else {
+                let rested = rest_state.snapshot();
+                if last_rest.as_ref() != Some(&rested) {
+                    let _ = app.emit("rest:changed", &rested);
+                    last_rest = Some(rested);
+                }
+            }
+
             if just_finished {
                 finished_at = Some(Instant::now());
                 let _ = app.emit("focus:finished", &snapshot);
+                sound::alarm(&app);
                 // The popup is very likely closed when a session runs out.
                 let title = snapshot
                     .task_id

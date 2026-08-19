@@ -51,7 +51,7 @@ CREATE TABLE tasks (
   goal_id          INTEGER REFERENCES goals(id) ON DELETE SET NULL,
   title            TEXT NOT NULL,
   description      TEXT,
-  category         TEXT NOT NULL DEFAULT 'backend',
+  category         TEXT NOT NULL DEFAULT 'task',
   status           TEXT NOT NULL DEFAULT 'ready',
   position         INTEGER NOT NULL DEFAULT 0,
   estimate_minutes INTEGER,
@@ -140,8 +140,38 @@ const ADD_THREAD_AGENT: &str = r#"
 ALTER TABLE codex_threads ADD COLUMN agent TEXT NOT NULL DEFAULT 'codex';
 "#;
 
+/// Categories used to be a fixed enum in the binary. They are rows now, so the
+/// developer can name their own. The built-in set collapses to Task and Bug;
+/// every task that carried one of the old labels lands on Task.
+const ADD_CATEGORIES: &str = r#"
+CREATE TABLE categories (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug     TEXT NOT NULL UNIQUE,
+  label    TEXT NOT NULL,
+  color    TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO categories (slug, label, color, position) VALUES
+  ('task', 'Task', '#4a9bf5', 0),
+  ('bug', 'Bug', '#e0609b', 1);
+UPDATE tasks SET category = 'task' WHERE category <> 'bug';
+"#;
+
+/// Tasks gained a relative size alongside the clock estimate, so a plan can be
+/// weighed as well as scheduled.
+const ADD_STORY_POINTS: &str = r#"
+ALTER TABLE tasks ADD COLUMN story_points INTEGER;
+"#;
+
 /// Migrations are applied in order; `user_version` records how many have run.
-const MIGRATIONS: &[&str] = &[SCHEMA, ADD_GOAL_PLANNING, ADD_GOAL_AGENT, ADD_THREAD_AGENT];
+const MIGRATIONS: &[&str] = &[
+    SCHEMA,
+    ADD_GOAL_PLANNING,
+    ADD_GOAL_AGENT,
+    ADD_THREAD_AGENT,
+    ADD_CATEGORIES,
+    ADD_STORY_POINTS,
+];
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -223,6 +253,149 @@ pub fn delete_project(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+// -------------------------------------------------------------- categories
+
+fn category_from_row(row: &Row) -> rusqlite::Result<Category> {
+    Ok(Category {
+        id: row.get("id")?,
+        slug: row.get("slug")?,
+        label: row.get("label")?,
+        color: row.get("color")?,
+        position: row.get("position")?,
+    })
+}
+
+pub fn list_categories(conn: &Connection) -> Result<Vec<Category>> {
+    let mut stmt = conn.prepare("SELECT * FROM categories ORDER BY position, id")?;
+    let rows = stmt.query_map([], category_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub fn find_category(conn: &Connection, id: i64) -> Result<Option<Category>> {
+    Ok(conn
+        .query_row("SELECT * FROM categories WHERE id = ?1", [id], category_from_row)
+        .optional()?)
+}
+
+/// The slug a task falls back to: the first category in the list. There is
+/// always at least one, because the last one cannot be deleted.
+pub fn default_category(conn: &Connection) -> Result<String> {
+    Ok(conn
+        .query_row(
+            "SELECT slug FROM categories ORDER BY position, id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| "task".to_string()))
+}
+
+/// Every slug, in display order. The planner offers these to the agent.
+pub fn category_slugs(conn: &Connection) -> Result<Vec<String>> {
+    Ok(list_categories(conn)?
+        .into_iter()
+        .map(|category| category.slug)
+        .collect())
+}
+
+/// Maps whatever the caller asked for onto a category that exists. A slug the
+/// developer has since deleted falls back rather than failing the write.
+pub fn resolve_category(conn: &Connection, raw: Option<&str>) -> Result<String> {
+    let Some(slug) = raw.map(str::trim).filter(|slug| !slug.is_empty()) else {
+        return default_category(conn);
+    };
+    let known: Option<String> = conn
+        .query_row("SELECT slug FROM categories WHERE slug = ?1", [slug], |row| {
+            row.get(0)
+        })
+        .optional()?;
+    match known {
+        Some(slug) => Ok(slug),
+        None => default_category(conn),
+    }
+}
+
+pub fn create_category(conn: &Connection, label: &str, color: &str) -> Result<Category> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err(crate::error::Error::invalid("a category needs a name"));
+    }
+    let slug = slugify(label);
+    if slug.is_empty() {
+        return Err(crate::error::Error::invalid(
+            "that name has no letters or numbers in it",
+        ));
+    }
+    let taken: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM categories WHERE slug = ?1)",
+        [&slug],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )?;
+    if taken {
+        return Err(crate::error::Error::invalid(format!(
+            "there is already a category called {label}"
+        )));
+    }
+    let next_position: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM categories",
+        [],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO categories (slug, label, color, position) VALUES (?1, ?2, ?3, ?4)",
+        params![slug, label, color.trim(), next_position],
+    )?;
+    find_category(conn, conn.last_insert_rowid())?.ok_or(crate::error::Error::NotFound("category"))
+}
+
+/// Renaming leaves the slug alone, so the tasks already filed under it keep
+/// their category and simply show the new name.
+pub fn update_category(conn: &Connection, id: i64, patch: &CategoryPatch) -> Result<Category> {
+    if find_category(conn, id)?.is_none() {
+        return Err(crate::error::Error::NotFound("category"));
+    }
+    if let Some(label) = &patch.label {
+        let label = label.trim();
+        if label.is_empty() {
+            return Err(crate::error::Error::invalid("a category needs a name"));
+        }
+        conn.execute(
+            "UPDATE categories SET label = ?2 WHERE id = ?1",
+            params![id, label],
+        )?;
+    }
+    if let Some(color) = &patch.color {
+        conn.execute(
+            "UPDATE categories SET color = ?2 WHERE id = ?1",
+            params![id, color.trim()],
+        )?;
+    }
+    find_category(conn, id)?.ok_or(crate::error::Error::NotFound("category"))
+}
+
+/// Deleting a category moves its tasks onto whichever category is left at the
+/// top of the list. The last one stays: a task always has a category.
+pub fn delete_category(conn: &Connection, id: i64) -> Result<Vec<Category>> {
+    let category = find_category(conn, id)?.ok_or(crate::error::Error::NotFound("category"))?;
+    let remaining = list_categories(conn)?;
+    if remaining.len() <= 1 {
+        return Err(crate::error::Error::invalid(
+            "keep at least one category — tasks need something to be filed under",
+        ));
+    }
+    let fallback = remaining
+        .iter()
+        .find(|other| other.id != id)
+        .map(|other| other.slug.clone())
+        .unwrap_or_else(|| "task".to_string());
+    conn.execute(
+        "UPDATE tasks SET category = ?2 WHERE category = ?1",
+        params![category.slug, fallback],
+    )?;
+    conn.execute("DELETE FROM categories WHERE id = ?1", [id])?;
+    list_categories(conn)
+}
+
 // ------------------------------------------------------------------- tasks
 
 fn criteria_for(conn: &Connection, task_id: i64) -> Result<Vec<AcceptanceCriterion>> {
@@ -275,10 +448,11 @@ fn task_from_row(conn: &Connection, row: &Row) -> Result<Task> {
         goal_id: row.get("goal_id")?,
         title: row.get("title")?,
         description: row.get("description")?,
-        category: TaskCategory::parse_lenient(&row.get::<_, String>("category")?),
+        category: row.get("category")?,
         status: TaskStatus::parse_lenient(&row.get::<_, String>("status")?),
         position: row.get("position")?,
         estimate_minutes: row.get("estimate_minutes")?,
+        story_points: row.get("story_points")?,
         is_ai_generated: row.get::<_, i64>("is_ai_generated")? != 0,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -375,17 +549,18 @@ pub fn create_task(conn: &Connection, input: &NewTask) -> Result<Task> {
     conn.execute(
         "INSERT INTO tasks
            (project_id, goal_id, title, description, category, status, position,
-            estimate_minutes, is_ai_generated, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+            estimate_minutes, story_points, is_ai_generated, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)",
         params![
             input.project_id,
             input.goal_id,
             title,
             input.description.as_deref(),
-            input.category.unwrap_or_default(),
+            resolve_category(conn, input.category.as_deref())?,
             input.status.unwrap_or_default(),
             next_position,
             input.estimate_minutes,
+            input.story_points.and_then(nearest_story_points),
             input.is_ai_generated.unwrap_or(false) as i64,
             ts,
         ],
@@ -419,10 +594,10 @@ pub fn update_task(conn: &Connection, id: i64, patch: &TaskPatch) -> Result<Task
             params![id, (!value.is_empty()).then_some(value)],
         )?;
     }
-    if let Some(category) = patch.category {
+    if let Some(category) = &patch.category {
         conn.execute(
             "UPDATE tasks SET category = ?2 WHERE id = ?1",
-            params![id, category],
+            params![id, resolve_category(conn, Some(category))?],
         )?;
     }
     if let Some(status) = patch.status {
@@ -441,6 +616,12 @@ pub fn update_task(conn: &Connection, id: i64, patch: &TaskPatch) -> Result<Task
         conn.execute(
             "UPDATE tasks SET estimate_minutes = ?2 WHERE id = ?1",
             params![id, (estimate > 0).then_some(estimate)],
+        )?;
+    }
+    if let Some(points) = patch.story_points {
+        conn.execute(
+            "UPDATE tasks SET story_points = ?2 WHERE id = ?1",
+            params![id, nearest_story_points(points)],
         )?;
     }
     if let Some(criteria) = &patch.criteria {
@@ -739,10 +920,11 @@ pub fn create_tasks_from_plan(conn: &Connection, goal: &Goal) -> Result<Vec<Task
                 title: planned.title.clone(),
                 description: (!planned.description.is_empty())
                     .then(|| planned.description.clone()),
-                category: Some(TaskCategory::parse_lenient(&planned.category)),
+                category: Some(planned.category.clone()),
                 status: Some(TaskStatus::Ready),
                 estimate_minutes: (planned.estimate_minutes > 0)
                     .then_some(planned.estimate_minutes),
+                story_points: (planned.story_points > 0).then_some(planned.story_points),
                 is_ai_generated: Some(true),
                 criteria: Some(planned.acceptance_criteria.clone()),
                 files: Some(planned.relevant_files.clone()),
@@ -765,6 +947,30 @@ pub fn create_tasks_from_plan(conn: &Connection, goal: &Goal) -> Result<Vec<Task
 
     set_goal_status(conn, goal.id, GoalStatus::Accepted)?;
     list_tasks(conn, goal.project_id)
+}
+
+/// Finished tasks since a moment, newest first.
+///
+/// The day each one belongs to is worked out where it is drawn, because "which
+/// day" is a question about the reader's clock rather than about UTC.
+pub fn completed_since(conn: &Connection, project_id: i64, since: i64) -> Result<Vec<CompletedTask>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, category, story_points, completed_at
+         FROM tasks
+         WHERE project_id = ?1 AND status = 'completed' AND completed_at IS NOT NULL
+           AND completed_at >= ?2
+         ORDER BY completed_at DESC",
+    )?;
+    let rows = stmt.query_map(params![project_id, since], |row| {
+        Ok(CompletedTask {
+            id: row.get(0)?,
+            title: row.get(1)?,
+            category: row.get(2)?,
+            story_points: row.get(3)?,
+            completed_at: row.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
 // ----------------------------------------------------------- verifications
@@ -917,6 +1123,9 @@ pub fn get_settings(conn: &Connection) -> Result<Settings> {
     if let Some(raw) = read_setting(conn, "notifications")? {
         settings.notifications = raw == "1";
     }
+    if let Some(raw) = read_setting(conn, "sounds")? {
+        settings.sounds = raw == "1";
+    }
     if let Some(raw) = read_setting(conn, "launch_at_login")? {
         settings.launch_at_login = raw == "1";
     }
@@ -955,6 +1164,9 @@ pub fn update_settings(conn: &Connection, patch: &SettingsPatch) -> Result<Setti
     }
     if let Some(on) = patch.notifications {
         write_setting(conn, "notifications", if on { "1" } else { "0" })?;
+    }
+    if let Some(on) = patch.sounds {
+        write_setting(conn, "sounds", if on { "1" } else { "0" })?;
     }
     if let Some(on) = patch.launch_at_login {
         write_setting(conn, "launch_at_login", if on { "1" } else { "0" })?;
@@ -1017,6 +1229,172 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn a_fresh_database_starts_with_task_and_bug() {
+        let conn = memory_db();
+        let labels: Vec<String> = list_categories(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|category| category.label)
+            .collect();
+        assert_eq!(labels, vec!["Task", "Bug"]);
+    }
+
+    #[test]
+    fn the_old_fixed_categories_collapse_onto_task_but_bugs_stay_bugs() {
+        // A database from before categories were rows, with the enum's values.
+        let before = MIGRATIONS
+            .iter()
+            .position(|migration| *migration == ADD_CATEGORIES)
+            .expect("the categories migration is in the list");
+        let conn = Connection::open_in_memory().unwrap();
+        for migration in &MIGRATIONS[..before] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO projects (path, name, is_git, created_at, last_opened_at)
+             VALUES ('/tmp/old', 'old', 1, 1, 1)",
+            [],
+        )
+        .unwrap();
+        for (title, category) in [("A", "frontend"), ("B", "devops"), ("C", "bug")] {
+            conn.execute(
+                "INSERT INTO tasks (project_id, title, category, created_at, updated_at)
+                 VALUES (1, ?1, ?2, 1, 1)",
+                params![title, category],
+            )
+            .unwrap();
+        }
+        conn.pragma_update(None, "user_version", before as i64).unwrap();
+
+        migrate(&conn).unwrap();
+
+        let mut stmt = conn.prepare("SELECT category FROM tasks ORDER BY id").unwrap();
+        let categories: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(categories, vec!["task", "task", "bug"]);
+    }
+
+    #[test]
+    fn a_new_category_is_slugged_and_cannot_be_added_twice() {
+        let conn = memory_db();
+        let created = create_category(&conn, "  Design Review ", "#123456").unwrap();
+        assert_eq!(created.slug, "design-review");
+        assert_eq!(created.label, "Design Review");
+        assert!(create_category(&conn, "design review", "#123456").is_err());
+    }
+
+    #[test]
+    fn renaming_a_category_keeps_the_tasks_filed_under_it() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let design = create_category(&conn, "Design", "#123456").unwrap();
+        let task = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                title: "Sketch the flow".into(),
+                category: Some("design".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        update_category(
+            &conn,
+            design.id,
+            &CategoryPatch {
+                label: Some("Product design".into()),
+                color: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(get_task(&conn, task.id).unwrap().category, "design");
+    }
+
+    #[test]
+    fn deleting_a_category_moves_its_tasks_to_the_first_one() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let chore = create_category(&conn, "Chore", "#123456").unwrap();
+        let task = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                title: "Bump deps".into(),
+                category: Some("chore".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        delete_category(&conn, chore.id).unwrap();
+
+        assert_eq!(get_task(&conn, task.id).unwrap().category, "task");
+    }
+
+    #[test]
+    fn the_last_category_cannot_be_deleted() {
+        let conn = memory_db();
+        let categories = list_categories(&conn).unwrap();
+        for category in &categories[1..] {
+            delete_category(&conn, category.id).unwrap();
+        }
+        assert!(delete_category(&conn, categories[0].id).is_err());
+    }
+
+    #[test]
+    fn a_task_filed_under_a_category_that_is_gone_falls_back() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                title: "Was planned as devops".into(),
+                category: Some("devops".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(task.category, "task");
+    }
+
+    #[test]
+    fn the_history_holds_only_finished_work_from_the_window_asked_for() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let old = a_task(&conn, project.id, "Long ago");
+        let recent = a_task(&conn, project.id, "Yesterday");
+        let open = a_task(&conn, project.id, "Still going");
+        for id in [old.id, recent.id] {
+            update_task(
+                &conn,
+                id,
+                &TaskPatch {
+                    status: Some(TaskStatus::Completed),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        // Push one of them outside the window.
+        conn.execute(
+            "UPDATE tasks SET completed_at = ?2 WHERE id = ?1",
+            params![old.id, now() - 400 * 86_400],
+        )
+        .unwrap();
+
+        let history = completed_since(&conn, project.id, now() - 365 * 86_400).unwrap();
+        let titles: Vec<String> = history.into_iter().map(|task| task.title).collect();
+        assert_eq!(titles, vec!["Yesterday"]);
+        assert!(get_task(&conn, open.id).unwrap().completed_at.is_none());
     }
 
     #[test]

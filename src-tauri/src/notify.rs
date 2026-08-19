@@ -20,9 +20,24 @@ pub enum Event<'a> {
     RunFailed { task: &'a str },
     /// A plan is waiting to be accepted.
     PlanReady { goal: &'a str, tasks: usize },
+    /// A break ran out.
+    BreakFinished,
 }
 
 impl Event<'_> {
+    /// True for the moments the developer is waiting on. These get the alarm
+    /// sound so a finished session is heard from across the room; the rest
+    /// arrive quietly.
+    fn is_alarm(&self) -> bool {
+        matches!(
+            self,
+            Event::FocusFinished { .. }
+                | Event::RunFinished { .. }
+                | Event::ApprovalNeeded { .. }
+                | Event::BreakFinished
+        )
+    }
+
     fn title(&self) -> String {
         match self {
             Event::FocusFinished { .. } => "Focus session finished".into(),
@@ -30,6 +45,7 @@ impl Event<'_> {
             Event::RunFinished { .. } => "Task run finished".into(),
             Event::RunFailed { .. } => "Task run failed".into(),
             Event::PlanReady { .. } => "Plan ready".into(),
+            Event::BreakFinished => "Break over".into(),
         }
     }
 
@@ -46,27 +62,36 @@ impl Event<'_> {
                 let word = if *tasks == 1 { "task" } else { "tasks" };
                 format!("{goal} — {tasks} {word} to review")
             }
+            Event::BreakFinished => "Ready when you are.".into(),
         }
     }
 }
 
 /// Shows a notification, unless the developer has turned them off.
 pub fn send(app: &AppHandle, event: Event<'_>) {
-    let enabled = app
+    let settings = app
         .try_state::<Db>()
-        .and_then(|db| db::get_settings(&db.conn()).ok())
+        .and_then(|db| db::get_settings(&db.conn()).ok());
+    let enabled = settings
+        .as_ref()
         .map(|settings| settings.notifications)
         .unwrap_or(true);
     if !enabled {
         return;
     }
+    let sounds = settings.map(|settings| settings.sounds).unwrap_or(true);
 
-    let _ = app
+    let mut builder = app
         .notification()
         .builder()
         .title(event.title())
-        .body(event.body())
-        .show();
+        .body(event.body());
+    // The popup is very likely closed when a session runs out, so the sound is
+    // the only part of this the developer will notice.
+    if sounds && event.is_alarm() {
+        builder = builder.sound("default");
+    }
+    let _ = builder.show();
 }
 
 #[cfg(test)]
@@ -87,6 +112,7 @@ mod tests {
                 goal: "Invoice downloads",
                 tasks: 5,
             },
+            Event::BreakFinished,
         ];
         for event in cases {
             assert!(!event.title().is_empty());
@@ -114,6 +140,21 @@ mod tests {
         }
         .body()
         .contains("1 task"));
+    }
+
+    #[test]
+    fn only_the_moments_worth_hearing_carry_the_alarm() {
+        assert!(Event::FocusFinished { task: "t" }.is_alarm());
+        assert!(Event::RunFinished {
+            task: "t",
+            changed: 1
+        }
+        .is_alarm());
+        assert!(!Event::PlanReady {
+            goal: "g",
+            tasks: 1
+        }
+        .is_alarm());
     }
 
     #[test]

@@ -58,7 +58,7 @@ fn describe_error(error: &Value) -> String {
 pub fn run_analysis(
     client: &CodexClient,
     project_path: &str,
-    goal: &str,
+    request: &plan::PlanRequest,
     model: Option<&str>,
     on_event: impl FnMut(AnalysisEvent),
     is_cancelled: impl Fn() -> bool,
@@ -66,15 +66,15 @@ pub fn run_analysis(
     let (text, thread_id) = run_read_only_turn(
         client,
         project_path,
-        &plan::prompt(goal),
-        plan::output_schema(),
+        &request.prompt,
+        request.schema(),
         model,
         on_event,
         is_cancelled,
         "Codex took too long to analyse this project.",
     )?;
     Ok(AnalysisOutcome {
-        plan: plan::parse_plan(&text)?,
+        plan: request.parse(&text)?,
         thread_id,
     })
 }

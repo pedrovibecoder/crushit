@@ -3,10 +3,15 @@
 //! Ignored by default: these spawn a process and talk to the developer's own
 //! Codex. Run with `cargo test -- --ignored --nocapture`.
 
-use blitzit_lib::codex::client::CodexClient;
-use blitzit_lib::codex::detect;
+use crushit_lib::codex::client::CodexClient;
+use crushit_lib::codex::detect;
 use serde_json::json;
 use std::time::Duration;
+
+/// The categories a freshly migrated database hands the planner.
+fn categories() -> Vec<String> {
+    vec!["task".to_string(), "bug".to_string()]
+}
 
 fn client_or_skip() -> Option<(CodexClient, std::path::PathBuf)> {
     let binary = detect::find_binary(None)?;
@@ -76,8 +81,8 @@ fn the_model_list_comes_back_populated() {
 #[test]
 #[ignore = "spawns the real codex app-server and starts a model turn"]
 fn a_planning_turn_runs_end_to_end() {
-    use blitzit_lib::codex::planning;
-    use blitzit_lib::plan::AnalysisEvent;
+    use crushit_lib::codex::planning;
+    use crushit_lib::plan::AnalysisEvent;
 
     let Some((client, binary)) = client_or_skip() else {
         panic!("no codex binary found");
@@ -88,7 +93,10 @@ fn a_planning_turn_runs_end_to_end() {
     let outcome = planning::run_analysis(
         &client,
         env!("CARGO_MANIFEST_DIR"),
-        "Add a command that reports how many tasks are overdue.",
+        &crushit_lib::plan::PlanRequest::goal(
+            "Add a command that reports how many tasks are overdue.",
+            categories(),
+        ),
         None,
         |event| {
             if let AnalysisEvent::StepStarted { label, .. } = event {

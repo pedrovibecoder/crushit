@@ -5,7 +5,6 @@
 //! sanitised the same way.
 
 use crate::error::{Error, Result};
-use crate::models::TaskCategory;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -29,6 +28,9 @@ pub struct PlannedTask {
     pub depends_on: Vec<i64>,
     #[serde(default)]
     pub estimate_minutes: i64,
+    /// Relative size on the Fibonacci scale; 0 when the agent gave none.
+    #[serde(default)]
+    pub story_points: i64,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -67,11 +69,20 @@ pub struct AnalysisOutcome {
     pub thread_id: String,
 }
 
-/// The JSON Schema the agent's final answer is constrained to.
-pub fn output_schema() -> Value {
-    let categories: Vec<&str> = vec![
-        "frontend", "backend", "database", "security", "testing", "devops", "refactor", "bug",
-    ];
+/// The category slugs an agent may choose from, guarding against a caller that
+/// somehow has none: an empty `enum` would make the schema unsatisfiable.
+fn choices(categories: &[String]) -> Vec<String> {
+    if categories.is_empty() {
+        vec!["task".to_string()]
+    } else {
+        categories.to_vec()
+    }
+}
+
+/// The JSON Schema the agent's final answer is constrained to. The categories
+/// are whatever the developer keeps in Settings, not a fixed list.
+pub fn output_schema(categories: &[String]) -> Value {
+    let categories = choices(categories);
     json!({
         "type": "object",
         "additionalProperties": false,
@@ -87,7 +98,7 @@ pub fn output_schema() -> Value {
                     "additionalProperties": false,
                     "required": [
                         "title", "description", "category", "acceptanceCriteria",
-                        "relevantFiles", "dependsOn", "estimateMinutes"
+                        "relevantFiles", "dependsOn", "estimateMinutes", "storyPoints"
                     ],
                     "properties": {
                         "title": { "type": "string" },
@@ -96,7 +107,8 @@ pub fn output_schema() -> Value {
                         "acceptanceCriteria": { "type": "array", "items": { "type": "string" } },
                         "relevantFiles": { "type": "array", "items": { "type": "string" } },
                         "dependsOn": { "type": "array", "items": { "type": "integer" } },
-                        "estimateMinutes": { "type": "integer" }
+                        "estimateMinutes": { "type": "integer" },
+                        "storyPoints": { "type": "integer", "enum": crate::models::STORY_POINTS }
                     }
                 }
             }
@@ -104,7 +116,8 @@ pub fn output_schema() -> Value {
     })
 }
 
-pub fn prompt(goal: &str) -> String {
+pub fn prompt(goal: &str, max_tasks: usize) -> String {
+    let scale = story_points_text();
     format!(
         "You are planning development work inside an existing repository.\n\n\
          GOAL\n{goal}\n\n\
@@ -115,12 +128,63 @@ pub fn prompt(goal: &str) -> String {
          Rules:\n\
          - Ground `existing` in things you actually found. Name the file or module.\n\
          - `missing` is what the goal needs that is not there yet.\n\
-         - At most {MAX_TASKS} tasks. Each one should be a single sitting of work.\n\
+         - At most {max_tasks} tasks. Each one should be a single sitting of work.\n\
          - `relevantFiles` are repository-relative paths, existing or to be created.\n\
          - `dependsOn` holds 1-based positions of earlier tasks in your own list.\n\
          - `acceptanceCriteria` are checkable statements, not restatements of the title.\n\
-         - `estimateMinutes` is a realistic whole number of minutes."
+         - `estimateMinutes` is a realistic whole number of minutes.\n\
+         - `storyPoints` sizes the task against the others on the Fibonacci \
+           scale ({scale}): complexity and unknowns, not hours."
     )
+}
+
+/// The scale as it appears in a prompt.
+fn story_points_text() -> String {
+    crate::models::STORY_POINTS
+        .iter()
+        .map(|point| point.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// One question to put to an agent, and the shape its answer has to take.
+///
+/// Planning a goal and importing someone else's task list ask for the same
+/// thing — an ordered list of tasks — so they travel through the same read-only
+/// turn, the same schema, and the same sanitising. Only the question differs.
+pub struct PlanRequest {
+    pub prompt: String,
+    pub categories: Vec<String>,
+    pub max_tasks: usize,
+}
+
+impl PlanRequest {
+    /// Plan a goal against the repository.
+    pub fn goal(goal: &str, categories: Vec<String>) -> Self {
+        Self {
+            prompt: prompt(goal, MAX_TASKS),
+            categories,
+            max_tasks: MAX_TASKS,
+        }
+    }
+
+    /// The JSON Schema an answer is constrained to, for agents that can.
+    pub fn schema(&self) -> Value {
+        output_schema(&self.categories)
+    }
+
+    /// The same shape spelled out in prose, for agents that cannot.
+    pub fn spelled_out(&self) -> String {
+        format!(
+            "{}{}",
+            self.prompt,
+            json_instruction(&self.categories, self.max_tasks)
+        )
+    }
+
+    pub fn parse(&self, text: &str) -> Result<Plan> {
+        parse_plan(text, &self.categories, self.max_tasks)
+    }
 }
 
 /// Strips a fenced code block if the model wrapped its JSON in one.
@@ -168,21 +232,27 @@ fn extract_json_object(text: &str) -> Option<&str> {
 }
 
 /// The shape to ask for when an agent has no schema-enforcing mode.
-pub fn json_instruction() -> String {
+pub fn json_instruction(categories: &[String], max_tasks: usize) -> String {
+    let scale = story_points_text();
+    let allowed = choices(categories)
+        .iter()
+        .map(|slug| format!("\"{slug}\""))
+        .collect::<Vec<_>>()
+        .join("|");
     format!(
         "\n\nReply with a single JSON object and nothing else — no prose, no code fence:\n\
          {{\n  \"summary\": string,\n  \"existing\": string[],\n  \"missing\": string[],\n  \
-         \"tasks\": [{{ \"title\": string, \"description\": string, \"category\": \
-         \"frontend\"|\"backend\"|\"database\"|\"security\"|\"testing\"|\"devops\"|\
-         \"refactor\"|\"bug\", \"acceptanceCriteria\": string[], \"relevantFiles\": string[], \
-         \"dependsOn\": number[], \"estimateMinutes\": number }}]\n}}\n\
-         Keep it compact: at most {MAX_TASKS} tasks, at most 4 acceptance criteria each."
+         \"tasks\": [{{ \"title\": string, \"description\": string, \"category\": {allowed}, \
+         \"acceptanceCriteria\": string[], \"relevantFiles\": string[], \
+         \"dependsOn\": number[], \"estimateMinutes\": number, \"storyPoints\": number }}]\n}}\n\
+         `storyPoints` is one of {scale}.\n\
+         Keep it compact: at most {max_tasks} tasks, at most 4 acceptance criteria each."
     )
 }
 
 /// Parses and sanitises a plan. The output schema makes the shape reliable;
 /// this makes the *contents* safe to store and show.
-pub fn parse_plan(text: &str) -> Result<Plan> {
+pub fn parse_plan(text: &str, categories: &[String], max_tasks: usize) -> Result<Plan> {
     let unfenced = unwrap_fence(text);
     // Try the whole answer first, then the JSON hiding inside it.
     let plan: Plan = serde_json::from_str(unfenced)
@@ -191,7 +261,7 @@ pub fn parse_plan(text: &str) -> Result<Plan> {
             None => Err(first),
         })
         .map_err(|error| Error::invalid(format!("the agent returned an unreadable plan: {error}")))?;
-    sanitise(plan)
+    sanitise(plan, categories, max_tasks)
 }
 
 /// Parses any JSON object out of an agent's answer, tolerating a code fence or
@@ -205,17 +275,18 @@ pub fn parse_json_object<T: serde::de::DeserializeOwned>(text: &str) -> serde_js
 }
 
 /// Same, for an agent that hands back an already-parsed object.
-pub fn plan_from_value(value: &Value) -> Result<Plan> {
+pub fn plan_from_value(value: &Value, categories: &[String], max_tasks: usize) -> Result<Plan> {
     let plan: Plan = serde_json::from_value(value.clone())
         .map_err(|error| Error::invalid(format!("the agent returned an unreadable plan: {error}")))?;
-    sanitise(plan)
+    sanitise(plan, categories, max_tasks)
 }
 
-fn sanitise(mut plan: Plan) -> Result<Plan> {
+fn sanitise(mut plan: Plan, categories: &[String], max_tasks: usize) -> Result<Plan> {
+    let allowed = choices(categories);
     plan.summary = plan.summary.trim().to_string();
     plan.existing = clean_list(plan.existing);
     plan.missing = clean_list(plan.missing);
-    plan.tasks.truncate(MAX_TASKS);
+    plan.tasks.truncate(max_tasks);
 
     let mut tasks = Vec::with_capacity(plan.tasks.len());
     for (index, mut task) in plan.tasks.into_iter().enumerate() {
@@ -224,10 +295,15 @@ fn sanitise(mut plan: Plan) -> Result<Plan> {
             continue;
         }
         task.description = task.description.trim().to_string();
-        task.category = TaskCategory::parse_lenient(&task.category).as_str().to_string();
+        // A category the developer has since renamed away or never had falls
+        // back to the first one rather than failing the whole plan.
+        if !allowed.iter().any(|slug| *slug == task.category) {
+            task.category = allowed[0].clone();
+        }
         task.acceptance_criteria = clean_list(task.acceptance_criteria);
         task.relevant_files = clean_list(task.relevant_files);
         task.estimate_minutes = task.estimate_minutes.clamp(0, 480);
+        task.story_points = crate::models::nearest_story_points(task.story_points).unwrap_or(0);
         // Only backward references survive, so a plan can never cycle.
         let position = index as i64 + 1;
         task.depends_on = task
@@ -283,6 +359,11 @@ pub fn unwrap_error_body(message: &str) -> String {
 mod tests {
     use super::*;
 
+    /// What the seeded categories table hands the planner.
+    fn categories() -> Vec<String> {
+        vec!["task".to_string(), "bug".to_string()]
+    }
+
     const SAMPLE: &str = r#"{
       "summary": "Invoices exist but cannot be downloaded.",
       "existing": ["Invoice model in src/models/invoice.ts", "  "],
@@ -291,7 +372,7 @@ mod tests {
         {
           "title": "  Create invoice PDF service  ",
           "description": "Render an invoice to a PDF buffer.",
-          "category": "backend",
+          "category": "bug",
           "acceptanceCriteria": ["Generates a valid PDF", ""],
           "relevantFiles": ["src/services/invoice.ts"],
           "dependsOn": [],
@@ -311,7 +392,7 @@ mod tests {
 
     #[test]
     fn a_plan_is_trimmed_and_normalised() {
-        let plan = parse_plan(SAMPLE).unwrap();
+        let plan = parse_plan(SAMPLE, &categories(), MAX_TASKS).unwrap();
         assert_eq!(plan.tasks[0].title, "Create invoice PDF service");
         assert_eq!(plan.existing, vec!["Invoice model in src/models/invoice.ts"]);
         assert_eq!(plan.tasks[0].acceptance_criteria, vec!["Generates a valid PDF"]);
@@ -319,29 +400,38 @@ mod tests {
 
     #[test]
     fn an_unknown_category_falls_back_rather_than_failing_the_plan() {
-        assert_eq!(parse_plan(SAMPLE).unwrap().tasks[1].category, "backend");
+        assert_eq!(parse_plan(SAMPLE, &categories(), MAX_TASKS).unwrap().tasks[1].category, "task");
+    }
+
+    #[test]
+    fn the_schema_offers_exactly_the_developers_own_categories() {
+        let schema = output_schema(&["design".to_string(), "chore".to_string()]);
+        assert_eq!(
+            schema["properties"]["tasks"]["items"]["properties"]["category"]["enum"],
+            serde_json::json!(["design", "chore"])
+        );
     }
 
     #[test]
     fn dependencies_only_point_backwards_so_a_plan_cannot_cycle() {
         // Task 2 asked to depend on 1, itself, and a task that does not exist.
-        assert_eq!(parse_plan(SAMPLE).unwrap().tasks[1].depends_on, vec![1]);
+        assert_eq!(parse_plan(SAMPLE, &categories(), MAX_TASKS).unwrap().tasks[1].depends_on, vec![1]);
     }
 
     #[test]
     fn a_wild_estimate_is_clamped() {
-        assert_eq!(parse_plan(SAMPLE).unwrap().tasks[1].estimate_minutes, 480);
+        assert_eq!(parse_plan(SAMPLE, &categories(), MAX_TASKS).unwrap().tasks[1].estimate_minutes, 480);
     }
 
     #[test]
     fn json_wrapped_in_a_code_fence_still_parses() {
-        assert!(parse_plan(&format!("```json\n{SAMPLE}\n```")).is_ok());
+        assert!(parse_plan(&format!("```json\n{SAMPLE}\n```"), &categories(), MAX_TASKS).is_ok());
     }
 
     #[test]
     fn an_already_parsed_object_takes_the_same_path() {
         let value: Value = serde_json::from_str(SAMPLE).unwrap();
-        let from_value = plan_from_value(&value).unwrap();
+        let from_value = plan_from_value(&value, &categories(), MAX_TASKS).unwrap();
         assert_eq!(from_value.tasks[0].title, "Create invoice PDF service");
         assert_eq!(from_value.tasks[1].depends_on, vec![1]);
     }
@@ -349,30 +439,34 @@ mod tests {
     #[test]
     fn json_buried_in_prose_is_still_found() {
         let wrapped = format!("Here is the plan you asked for:\n\n{SAMPLE}\n\nHope that helps!");
-        let plan = parse_plan(&wrapped).unwrap();
+        let plan = parse_plan(&wrapped, &categories(), MAX_TASKS).unwrap();
         assert_eq!(plan.tasks[0].title, "Create invoice PDF service");
     }
 
     #[test]
     fn a_brace_inside_a_string_does_not_end_the_object_early() {
         let text = r#"note {"summary":"uses {braces} inside","existing":[],"missing":[],"tasks":[{"title":"T","description":"","category":"backend","acceptanceCriteria":[],"relevantFiles":[],"dependsOn":[],"estimateMinutes":5}]} done"#;
-        let plan = parse_plan(text).unwrap();
+        let plan = parse_plan(text, &categories(), MAX_TASKS).unwrap();
         assert_eq!(plan.summary, "uses {braces} inside");
     }
 
     #[test]
     fn text_with_no_json_at_all_is_an_error_not_a_panic() {
-        assert!(parse_plan("I could not work that out, sorry.").is_err());
+        assert!(parse_plan("I could not work that out, sorry.", &categories(), MAX_TASKS).is_err());
     }
 
     #[test]
     fn a_plan_with_no_usable_tasks_is_an_error() {
-        assert!(parse_plan(r#"{"summary":"","existing":[],"missing":[],"tasks":[]}"#).is_err());
+        assert!(parse_plan(
+            r#"{"summary":"","existing":[],"missing":[],"tasks":[]}"#,
+            &categories(),
+            MAX_TASKS,
+        ).is_err());
     }
 
     #[test]
     fn the_output_schema_forbids_stray_fields() {
-        let schema = output_schema();
+        let schema = output_schema(&categories());
         assert_eq!(schema["additionalProperties"], false);
         assert_eq!(schema["properties"]["tasks"]["items"]["additionalProperties"], false);
     }
@@ -397,7 +491,7 @@ mod tests {
 
     #[test]
     fn the_json_instruction_names_every_field_the_parser_needs() {
-        let text = json_instruction();
+        let text = json_instruction(&categories(), MAX_TASKS);
         for field in [
             "summary", "existing", "missing", "tasks", "title", "description",
             "category", "acceptanceCriteria", "relevantFiles", "dependsOn",

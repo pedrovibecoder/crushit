@@ -1,4 +1,4 @@
-# Blitzit
+# Crushit
 
 A macOS menu-bar taskbar for developers, built to the
 [PRD](./PRD%20—%20AI%20Developer%20Taskbar%20with%20Codex.md).
@@ -40,7 +40,7 @@ swift preview/windows.swift            # onScreen only
 
 Planning runs through **Codex** or **Claude Code**; pick one under Settings →
 Coding agent. Whichever you choose needs to be installed and signed in
-(`codex login` / `claude auth login`). Settings shows what Blitzit found for
+(`codex login` / `claude auth login`). Settings shows what Crushit found for
 each and lets you point at a specific binary when discovery misses it.
 
 The PRD scopes V1 to Codex; Claude Code was added on request, so the two sit
@@ -97,7 +97,9 @@ closing the popup never stops a session or an analysis, and reopening shows the
 run still in progress. The frontend only mirrors what the backend emits.
 
 Database state lives at
-`~/Library/Application Support/com.cleonart.blitzit/blitzit.sqlite3`.
+`~/Library/Application Support/com.cleonart.blitzit/blitzit.sqlite3` — still the
+old identifier and filename, so the rename to Crushit did not strand anyone's
+projects and tasks.
 Migrations run from `MIGRATIONS` in `db.rs`, tracked by `PRAGMA user_version` —
 add a new entry rather than editing an existing one.
 

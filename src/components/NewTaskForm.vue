@@ -1,13 +1,19 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
-import { CATEGORY_DOTS, CATEGORY_LABELS, TASK_CATEGORIES, type NewTask, type TaskCategory } from "../types";
+import { useCategoriesStore } from "../stores/categories";
+import type { NewTask, TaskCategory } from "../types";
 
 const props = defineProps<{ projectId: number }>();
 const emit = defineEmits<{ (event: "submit", input: NewTask): void }>();
 
+const categories = useCategoriesStore();
+
 const title = ref("");
-const category = ref<TaskCategory>("backend");
+/** Empty until the developer picks: the store's first category is the default. */
+const chosen = ref<TaskCategory | null>(null);
 const input = ref<HTMLInputElement | null>(null);
+
+const category = computed(() => chosen.value ?? categories.fallback);
 
 /**
  * The category picker only appears once there is something to categorise. A
@@ -25,6 +31,7 @@ function submit() {
     category: category.value,
   });
   title.value = "";
+  chosen.value = null;
   void nextTick(() => input.value?.focus());
 }
 
@@ -54,23 +61,23 @@ defineExpose({ focus: () => input.value?.focus() });
 
     <div v-if="picking" class="mt-2 flex flex-wrap gap-1 pl-[26px]">
       <button
-        v-for="value in TASK_CATEGORIES"
-        :key="value"
+        v-for="option in categories.categories"
+        :key="option.id"
         type="button"
         class="chip transition-colors"
         :class="
-          category === value
+          category === option.slug
             ? 'border-solid bg-solid text-on-solid'
             : 'text-ink-2 hover:bg-line-soft'
         "
-        :aria-pressed="category === value"
-        @click="category = value"
+        :aria-pressed="category === option.slug"
+        @click="chosen = option.slug"
       >
         <span
           class="h-[6px] w-[6px] shrink-0 rounded-full"
-          :style="{ backgroundColor: CATEGORY_DOTS[value] }"
+          :style="{ backgroundColor: option.color }"
         />
-        {{ CATEGORY_LABELS[value] }}
+        {{ option.label }}
       </button>
     </div>
   </form>

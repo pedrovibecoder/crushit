@@ -1,20 +1,27 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import AppIcon from "../components/AppIcon.vue";
 import PanelHeader from "../components/PanelHeader.vue";
 import SelectMenu from "../components/SelectMenu.vue";
 import { formatClock, formatSpan } from "../lib/format";
+import { errorMessage, ipc } from "../lib/ipc";
 import { useAppStore } from "../stores/app";
 import { useFocusStore } from "../stores/focus";
 import { useTasksStore } from "../stores/tasks";
-import { CATEGORY_LABELS, STATUS_LABELS, TASK_CATEGORIES, type TaskCategory } from "../types";
-
-const CATEGORY_OPTIONS = TASK_CATEGORIES.map((value) => ({
-  value,
-  label: CATEGORY_LABELS[value],
-}));
+import { useAgentStore } from "../stores/agent";
+import { useCategoriesStore } from "../stores/categories";
+import { STORY_POINTS, STATUS_LABELS, type TaskCategory } from "../types";
 
 const app = useAppStore();
+const categories = useCategoriesStore();
+const agents = useAgentStore();
+
+const categoryOptions = computed(() =>
+  categories.categories.map((category) => ({
+    value: category.slug,
+    label: category.label,
+  })),
+);
 const tasks = useTasksStore();
 const focus = useFocusStore();
 
@@ -55,15 +62,90 @@ const sessionNote = computed(() => {
 const title = ref("");
 const newCriterion = ref("");
 const confirmingDelete = ref(false);
+/** Finishing is one click away from undoing an afternoon, so it is asked for. */
+const confirmingDone = ref(false);
+/**
+ * The description is held here rather than read straight off the task. The
+ * screen redraws every second while a session runs, and a field bound to the
+ * stored value can have half-typed text written back over it; a draft of your
+ * own cannot.
+ */
+const description = ref("");
+const editingDescription = ref(false);
+
+/**
+ * A task typed in a hurry rarely says when it is finished. The agent proposes
+ * the checkable statements that would settle it, and they are shown for review
+ * rather than written straight onto the task.
+ */
+const suggesting = ref(false);
+const suggested = ref<string[]>([]);
+const rejected = ref<Set<string>>(new Set());
+const suggestError = ref<string | null>(null);
+
+const accepted = computed(() =>
+  suggested.value.filter((text) => !rejected.value.has(text)),
+);
+
+async function suggestCriteria() {
+  if (!task.value || suggesting.value) return;
+  suggesting.value = true;
+  suggestError.value = null;
+  suggested.value = [];
+  rejected.value = new Set();
+  try {
+    const proposed = await ipc.suggestCriteria(task.value.id);
+    suggested.value = proposed;
+    if (!proposed.length) {
+      suggestError.value = `${agents.selected === "codex" ? "Codex" : "Claude Code"} had nothing to add.`;
+    }
+  } catch (caught) {
+    suggestError.value = errorMessage(caught);
+  } finally {
+    suggesting.value = false;
+  }
+}
+
+function toggleSuggestion(text: string) {
+  const next = new Set(rejected.value);
+  if (next.has(text)) next.delete(text);
+  else next.add(text);
+  rejected.value = next;
+}
+
+function dismissSuggestions() {
+  suggested.value = [];
+  rejected.value = new Set();
+  suggestError.value = null;
+}
+
+async function acceptSuggestions() {
+  if (!task.value || !accepted.value.length) return;
+  const texts = [...task.value.criteria.map((c) => c.text), ...accepted.value];
+  await tasks.update(task.value.id, { criteria: texts });
+  dismissSuggestions();
+}
 
 watch(
   task,
   (current) => {
     title.value = current?.title ?? "";
+    // Only while it is not being typed into: a change arriving from an agent
+    // run should show up, but never mid-sentence.
+    if (!editingDescription.value) description.value = current?.description ?? "";
     confirmingDelete.value = false;
+    confirmingDone.value = false;
+    dismissSuggestions();
   },
   { immediate: true },
 );
+
+async function commitDescription() {
+  editingDescription.value = false;
+  const value = description.value.trim();
+  if (!task.value || value === (task.value.description ?? "")) return;
+  await tasks.update(task.value.id, { description: value });
+}
 
 async function commitTitle() {
   const trimmed = title.value.trim();
@@ -92,15 +174,27 @@ async function removeCriterion(index: number) {
 
 async function toggleDone() {
   if (!task.value) return;
+  // Reopening something is harmless and undoes itself; finishing it stops a
+  // session and takes you off the screen, so only that is confirmed.
+  if (task.value.status !== "completed" && !confirmingDone.value) {
+    confirmingDone.value = true;
+    return;
+  }
+  confirmingDone.value = false;
   if (isFocused.value) await focus.stop();
   await tasks.toggleComplete(task.value);
   app.back();
 }
 
 async function destroy() {
-  if (!task.value) return;
-  await tasks.remove(task.value.id);
+  const doomed = task.value;
+  if (!doomed) return;
+  confirmingDelete.value = false;
+  // Back to the list first, then delete: the row is still on screen, so it can
+  // be seen leaving instead of having vanished behind a screen change.
   app.back();
+  await nextTick();
+  await tasks.remove(doomed.id);
 }
 </script>
 
@@ -217,23 +311,79 @@ async function destroy() {
           class="field mt-1.5 w-full px-2.5 py-2 text-[12.5px]"
           @keydown.enter.prevent="addCriterion"
         />
+
+        <!-- What the agent proposes, before any of it is written down. -->
+        <div v-if="suggested.length" class="card mt-1.5 border-accent/35 px-2.5 py-2">
+          <p class="eyebrow text-accent">Suggested acceptance criteria</p>
+          <ul class="mt-1.5 space-y-1">
+            <li v-for="text in suggested" :key="text">
+              <button
+                class="flex w-full items-start gap-2 text-left"
+                :aria-pressed="!rejected.has(text)"
+                @click="toggleSuggestion(text)"
+              >
+                <span
+                  class="mt-px flex h-[15px] w-[15px] shrink-0 items-center justify-center rounded-[5px] border transition-colors"
+                  :class="
+                    rejected.has(text)
+                      ? 'border-line'
+                      : 'border-accent bg-accent text-white'
+                  "
+                >
+                  <AppIcon v-if="!rejected.has(text)" name="check" :size="9" :weight="2.6" />
+                </span>
+                <span
+                  class="min-w-0 flex-1 text-[12px] leading-snug"
+                  :class="rejected.has(text) ? 'text-ink-3 line-through' : 'text-ink-2'"
+                >
+                  {{ text }}
+                </span>
+              </button>
+            </li>
+          </ul>
+          <div class="mt-2 flex gap-1.5">
+            <button class="btn btn-ghost px-2.5 py-1.5 text-[11.5px]" @click="dismissSuggestions">
+              Discard
+            </button>
+            <button
+              class="btn btn-dark flex-1 py-1.5 text-[11.5px]"
+              :disabled="!accepted.length"
+              @click="acceptSuggestions"
+            >
+              Add {{ accepted.length }}
+            </button>
+          </div>
+        </div>
+
+        <button
+          v-else-if="agents.isReady"
+          class="btn btn-ghost mt-1.5 w-full py-1.5 text-[11.5px] text-ink-2"
+          :disabled="suggesting"
+          @click="suggestCriteria"
+        >
+          <AppIcon name="sparkle" :size="11" filled />
+          {{ suggesting ? "Reading the project…" : "Generate acceptance criteria" }}
+        </button>
+
+        <p v-if="suggestError" class="mt-1.5 text-[11px] text-danger">{{ suggestError }}</p>
       </section>
 
       <!-- Details -->
       <section class="mt-4">
         <h2 class="eyebrow">Details</h2>
         <textarea
-          :value="task.description ?? ''"
+          v-model="description"
           rows="8"
           placeholder="What needs to change?"
           class="field mt-1.5 w-full resize-none px-2.5 py-2 text-[12.5px] leading-snug"
-          @change="tasks.update(task.id, { description: ($event.target as HTMLTextAreaElement).value })"
+          @focus="editingDescription = true"
+          @blur="commitDescription"
         />
         <div class="mt-1.5 flex items-center gap-1.5">
           <div class="min-w-0 flex-1">
             <SelectMenu
               :model-value="task.category"
-              :options="CATEGORY_OPTIONS"
+              :options="categoryOptions"
               label="Category"
               @update:model-value="tasks.update(task.id, { category: $event as TaskCategory })"
             />
@@ -248,6 +398,30 @@ async function destroy() {
             @change="tasks.update(task.id, { estimateMinutes: Number(($event.target as HTMLInputElement).value) })"
           />
         </div>
+        <div class="mt-1.5 flex items-center gap-1.5">
+          <span class="eyebrow shrink-0">Points</span>
+          <div class="flex flex-1 items-center gap-1">
+            <button
+              v-for="points in STORY_POINTS"
+              :key="points"
+              class="tnum flex-1 rounded-[8px] border py-1 text-[11px] font-semibold transition-colors"
+              :class="
+                task.storyPoints === points
+                  ? 'border-solid bg-solid text-on-solid'
+                  : 'border-line bg-card text-ink-2 hover:bg-line-soft'
+              "
+              :aria-pressed="task.storyPoints === points"
+              @click="
+                tasks.update(task.id, {
+                  storyPoints: task.storyPoints === points ? 0 : points,
+                })
+              "
+            >
+              {{ points }}
+            </button>
+          </div>
+        </div>
+
         <ul v-if="task.files.length" class="mt-1.5 space-y-1">
           <li
             v-for="file in task.files"
@@ -262,26 +436,51 @@ async function destroy() {
     </div>
 
     <footer class="flex items-center gap-2 border-t border-line px-3.5 py-2.5">
-      <button class="btn btn-dark flex-1 py-2" @click="toggleDone">
-        <AppIcon name="check" :size="13" />
-        {{ task.status === "completed" ? "Reopen" : "Mark complete" }}
-      </button>
-      <button
-        v-if="!confirmingDelete"
-        class="icon-btn h-[34px] w-[34px] shrink-0 text-ink-2 hover:text-danger"
-        aria-label="Delete task"
-        title="Delete task"
-        @click="confirmingDelete = true"
-      >
-        <AppIcon name="trash" :size="14" />
-      </button>
-      <button
-        v-else
-        class="btn shrink-0 border border-danger/30 bg-danger-soft px-2.5 py-2 text-danger"
-        @click="destroy"
-      >
-        Delete
-      </button>
+      <!-- Deleting takes the criteria and the recorded time with it, so it is
+           spelled out rather than hidden behind a second click on an icon. -->
+      <template v-if="confirmingDelete">
+        <span class="min-w-0 flex-1 text-[11.5px] leading-snug text-ink-2">
+          Delete this task{{ task.criteria.length ? " and its criteria" : "" }}?
+        </span>
+        <button class="btn btn-ghost shrink-0 px-3 py-2" @click="confirmingDelete = false">
+          Cancel
+        </button>
+        <button
+          class="btn shrink-0 border border-danger/40 bg-danger-soft px-3 py-2 text-danger"
+          @click="destroy"
+        >
+          <AppIcon name="trash" :size="13" />
+          Delete
+        </button>
+      </template>
+
+      <template v-else>
+        <button
+          v-if="confirmingDone"
+          class="btn btn-ghost shrink-0 px-3 py-2"
+          @click="confirmingDone = false"
+        >
+          Cancel
+        </button>
+        <button class="btn btn-dark flex-1 py-2" @click="toggleDone">
+          <AppIcon name="check" :size="13" />
+          {{
+            task.status === "completed"
+              ? "Reopen"
+              : confirmingDone
+                ? "Yes, it's done"
+                : "Mark complete"
+          }}
+        </button>
+        <button
+          class="icon-btn h-[34px] w-[34px] shrink-0 text-ink-2 hover:text-danger"
+          aria-label="Delete task"
+          title="Delete task"
+          @click="confirmingDelete = true; confirmingDone = false"
+        >
+          <AppIcon name="trash" :size="14" />
+        </button>
+      </template>
     </footer>
   </div>
 </template>

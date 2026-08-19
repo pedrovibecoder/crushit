@@ -46,7 +46,7 @@ onBeforeUnmount(() => observer?.disconnect());
       </div>
       <!-- Startup itself failed; offer the one action that can help. -->
       <div v-else-if="app.failed" class="flex flex-col items-center gap-2 px-6 py-10 text-center">
-        <p class="text-[12.5px] font-semibold">Blitzit could not start up</p>
+        <p class="text-[12.5px] font-semibold">Crushit could not start up</p>
         <p class="text-[11.5px] leading-relaxed text-ink-2">{{ app.error }}</p>
         <button class="btn btn-dark mt-1 px-4 py-2" @click="app.bootstrap()">Try again</button>
       </div>
