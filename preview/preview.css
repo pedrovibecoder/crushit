@@ -1,0 +1,4 @@
+/* Tailwind's automatic source detection is rooted at the preview directory,
+   so point it back at the app's components for this harness only. */
+@import "../src/style.css";
+@source "../src";

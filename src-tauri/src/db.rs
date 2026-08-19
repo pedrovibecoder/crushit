@@ -1,0 +1,1136 @@
+use crate::error::Result;
+use crate::models::*;
+use rusqlite::{params, Connection, OptionalExtension, Row};
+use std::sync::Mutex;
+
+pub struct Db(pub Mutex<Connection>);
+
+impl Db {
+    pub fn open(path: &std::path::Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = Connection::open(path)?;
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "foreign_keys", "ON")?;
+        migrate(&conn)?;
+        Ok(Db(Mutex::new(conn)))
+    }
+
+    pub fn conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        // A poisoned lock means an earlier command panicked mid-query; the
+        // connection itself is still usable, so recover rather than cascade.
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+const SCHEMA: &str = r#"
+CREATE TABLE projects (
+  id             INTEGER PRIMARY KEY AUTOINCREMENT,
+  path           TEXT NOT NULL UNIQUE,
+  name           TEXT NOT NULL,
+  is_git         INTEGER NOT NULL DEFAULT 0,
+  branch         TEXT,
+  created_at     INTEGER NOT NULL,
+  last_opened_at INTEGER NOT NULL
+);
+
+CREATE TABLE goals (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  title      TEXT NOT NULL,
+  prompt     TEXT NOT NULL,
+  status     TEXT NOT NULL DEFAULT 'draft',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX idx_goals_project ON goals(project_id);
+
+CREATE TABLE tasks (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id       INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  goal_id          INTEGER REFERENCES goals(id) ON DELETE SET NULL,
+  title            TEXT NOT NULL,
+  description      TEXT,
+  category         TEXT NOT NULL DEFAULT 'backend',
+  status           TEXT NOT NULL DEFAULT 'ready',
+  position         INTEGER NOT NULL DEFAULT 0,
+  estimate_minutes INTEGER,
+  is_ai_generated  INTEGER NOT NULL DEFAULT 0,
+  created_at       INTEGER NOT NULL,
+  updated_at       INTEGER NOT NULL,
+  completed_at     INTEGER
+);
+CREATE INDEX idx_tasks_project ON tasks(project_id, position);
+
+CREATE TABLE task_acceptance_criteria (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id  INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  text     TEXT NOT NULL,
+  is_met   INTEGER NOT NULL DEFAULT 0,
+  position INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_criteria_task ON task_acceptance_criteria(task_id, position);
+
+CREATE TABLE task_files (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  path    TEXT NOT NULL
+);
+CREATE INDEX idx_task_files_task ON task_files(task_id);
+
+CREATE TABLE task_dependencies (
+  task_id            INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  depends_on_task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  PRIMARY KEY (task_id, depends_on_task_id)
+);
+
+CREATE TABLE codex_threads (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id          INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  codex_thread_id  TEXT NOT NULL,
+  status           TEXT NOT NULL DEFAULT 'idle',
+  started_at       INTEGER NOT NULL,
+  last_activity_at INTEGER NOT NULL
+);
+CREATE INDEX idx_threads_task ON codex_threads(task_id);
+
+CREATE TABLE focus_sessions (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id         INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  started_at      INTEGER NOT NULL,
+  ended_at        INTEGER,
+  planned_seconds INTEGER NOT NULL,
+  elapsed_seconds INTEGER NOT NULL DEFAULT 0,
+  completed       INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_focus_task ON focus_sessions(task_id);
+
+CREATE TABLE task_verifications (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id         INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  created_at      INTEGER NOT NULL,
+  satisfied_count INTEGER NOT NULL DEFAULT 0,
+  total_count     INTEGER NOT NULL DEFAULT 0,
+  summary         TEXT,
+  raw_result      TEXT
+);
+
+CREATE TABLE settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+"#;
+
+/// Goals gained a Codex-produced plan once planning arrived.
+const ADD_GOAL_PLANNING: &str = r#"
+ALTER TABLE goals ADD COLUMN codex_thread_id TEXT;
+ALTER TABLE goals ADD COLUMN plan_json TEXT;
+ALTER TABLE goals ADD COLUMN error TEXT;
+ALTER TABLE goals ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+"#;
+
+/// Plans can come from more than one coding agent.
+const ADD_GOAL_AGENT: &str = r#"
+ALTER TABLE goals ADD COLUMN agent TEXT NOT NULL DEFAULT 'codex';
+"#;
+
+/// Migrations are applied in order; `user_version` records how many have run.
+const MIGRATIONS: &[&str] = &[SCHEMA, ADD_GOAL_PLANNING, ADD_GOAL_AGENT];
+
+fn migrate(conn: &Connection) -> Result<()> {
+    let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    for (index, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
+        conn.execute_batch(migration)?;
+        conn.pragma_update(None, "user_version", (index + 1) as i64)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------- projects
+
+fn project_from_row(row: &Row) -> rusqlite::Result<Project> {
+    Ok(Project {
+        id: row.get("id")?,
+        path: row.get("path")?,
+        name: row.get("name")?,
+        is_git: row.get::<_, i64>("is_git")? != 0,
+        branch: row.get("branch")?,
+        created_at: row.get("created_at")?,
+        last_opened_at: row.get("last_opened_at")?,
+    })
+}
+
+pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
+    let mut stmt =
+        conn.prepare("SELECT * FROM projects ORDER BY last_opened_at DESC, name COLLATE NOCASE")?;
+    let rows = stmt.query_map([], project_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub fn find_project(conn: &Connection, id: i64) -> Result<Option<Project>> {
+    Ok(conn
+        .query_row("SELECT * FROM projects WHERE id = ?1", [id], project_from_row)
+        .optional()?)
+}
+
+pub fn find_project_by_path(conn: &Connection, path: &str) -> Result<Option<Project>> {
+    Ok(conn
+        .query_row(
+            "SELECT * FROM projects WHERE path = ?1",
+            [path],
+            project_from_row,
+        )
+        .optional()?)
+}
+
+pub fn upsert_project(
+    conn: &Connection,
+    path: &str,
+    name: &str,
+    is_git: bool,
+    branch: Option<&str>,
+) -> Result<Project> {
+    let ts = now();
+    conn.execute(
+        "INSERT INTO projects (path, name, is_git, branch, created_at, last_opened_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+         ON CONFLICT(path) DO UPDATE SET
+           name = excluded.name,
+           is_git = excluded.is_git,
+           branch = excluded.branch,
+           last_opened_at = excluded.last_opened_at",
+        params![path, name, is_git as i64, branch, ts],
+    )?;
+    find_project_by_path(conn, path)?.ok_or(crate::error::Error::NotFound("project"))
+}
+
+pub fn touch_project(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE projects SET last_opened_at = ?2 WHERE id = ?1",
+        params![id, now()],
+    )?;
+    Ok(())
+}
+
+pub fn delete_project(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM projects WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+// ------------------------------------------------------------------- tasks
+
+fn criteria_for(conn: &Connection, task_id: i64) -> Result<Vec<AcceptanceCriterion>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, task_id, text, is_met, position
+         FROM task_acceptance_criteria WHERE task_id = ?1 ORDER BY position, id",
+    )?;
+    let rows = stmt.query_map([task_id], |row| {
+        Ok(AcceptanceCriterion {
+            id: row.get(0)?,
+            task_id: row.get(1)?,
+            text: row.get(2)?,
+            is_met: row.get::<_, i64>(3)? != 0,
+            position: row.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn files_for(conn: &Connection, task_id: i64) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT path FROM task_files WHERE task_id = ?1 ORDER BY id")?;
+    let rows = stmt.query_map([task_id], |row| row.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn dependencies_for(conn: &Connection, task_id: i64) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?1 ORDER BY depends_on_task_id",
+    )?;
+    let rows = stmt.query_map([task_id], |row| row.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn focus_seconds_for(conn: &Connection, task_id: i64) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(SUM(elapsed_seconds), 0) FROM focus_sessions WHERE task_id = ?1",
+        [task_id],
+        |row| row.get(0),
+    )?)
+}
+
+fn task_from_row(conn: &Connection, row: &Row) -> Result<Task> {
+    let id: i64 = row.get("id")?;
+    Ok(Task {
+        id,
+        project_id: row.get("project_id")?,
+        goal_id: row.get("goal_id")?,
+        title: row.get("title")?,
+        description: row.get("description")?,
+        category: TaskCategory::parse_lenient(&row.get::<_, String>("category")?),
+        status: TaskStatus::parse_lenient(&row.get::<_, String>("status")?),
+        position: row.get("position")?,
+        estimate_minutes: row.get("estimate_minutes")?,
+        is_ai_generated: row.get::<_, i64>("is_ai_generated")? != 0,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        completed_at: row.get("completed_at")?,
+        criteria: criteria_for(conn, id)?,
+        files: files_for(conn, id)?,
+        depends_on: dependencies_for(conn, id)?,
+        focus_seconds: focus_seconds_for(conn, id)?,
+    })
+}
+
+pub fn list_tasks(conn: &Connection, project_id: i64) -> Result<Vec<Task>> {
+    let mut stmt =
+        conn.prepare("SELECT id FROM tasks WHERE project_id = ?1 ORDER BY position, id")?;
+    let ids: Vec<i64> = stmt
+        .query_map([project_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    ids.into_iter()
+        .map(|id| get_task(conn, id))
+        .collect::<Result<Vec<_>>>()
+}
+
+pub fn get_task(conn: &Connection, id: i64) -> Result<Task> {
+    let mut stmt = conn.prepare("SELECT * FROM tasks WHERE id = ?1")?;
+    let mut rows = stmt.query([id])?;
+    match rows.next()? {
+        Some(row) => task_from_row(conn, row),
+        None => Err(crate::error::Error::NotFound("task")),
+    }
+}
+
+fn replace_criteria(conn: &Connection, task_id: i64, texts: &[String]) -> Result<()> {
+    // Preserve the met/unmet state of criteria whose text is unchanged.
+    let previous: Vec<(String, bool)> = criteria_for(conn, task_id)?
+        .into_iter()
+        .map(|c| (c.text, c.is_met))
+        .collect();
+    conn.execute(
+        "DELETE FROM task_acceptance_criteria WHERE task_id = ?1",
+        [task_id],
+    )?;
+    for (index, text) in texts.iter().enumerate() {
+        let was_met = previous
+            .iter()
+            .find(|(prev, _)| prev == text)
+            .map(|(_, met)| *met)
+            .unwrap_or(false);
+        conn.execute(
+            "INSERT INTO task_acceptance_criteria (task_id, text, is_met, position)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![task_id, text, was_met as i64, index as i64],
+        )?;
+    }
+    Ok(())
+}
+
+fn replace_files(conn: &Connection, task_id: i64, paths: &[String]) -> Result<()> {
+    conn.execute("DELETE FROM task_files WHERE task_id = ?1", [task_id])?;
+    for path in paths {
+        conn.execute(
+            "INSERT INTO task_files (task_id, path) VALUES (?1, ?2)",
+            params![task_id, path],
+        )?;
+    }
+    Ok(())
+}
+
+fn replace_dependencies(conn: &Connection, task_id: i64, depends_on: &[i64]) -> Result<()> {
+    conn.execute("DELETE FROM task_dependencies WHERE task_id = ?1", [task_id])?;
+    for other in depends_on {
+        if *other == task_id {
+            return Err(crate::error::Error::invalid("a task cannot depend on itself"));
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_task_id) VALUES (?1, ?2)",
+            params![task_id, other],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn create_task(conn: &Connection, input: &NewTask) -> Result<Task> {
+    let title = input.title.trim();
+    if title.is_empty() {
+        return Err(crate::error::Error::invalid("task title cannot be empty"));
+    }
+    let ts = now();
+    let next_position: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM tasks WHERE project_id = ?1",
+        [input.project_id],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO tasks
+           (project_id, goal_id, title, description, category, status, position,
+            estimate_minutes, is_ai_generated, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
+        params![
+            input.project_id,
+            input.goal_id,
+            title,
+            input.description.as_deref(),
+            input.category.unwrap_or_default(),
+            input.status.unwrap_or_default(),
+            next_position,
+            input.estimate_minutes,
+            input.is_ai_generated.unwrap_or(false) as i64,
+            ts,
+        ],
+    )?;
+    let id = conn.last_insert_rowid();
+    if let Some(criteria) = &input.criteria {
+        replace_criteria(conn, id, criteria)?;
+    }
+    if let Some(files) = &input.files {
+        replace_files(conn, id, files)?;
+    }
+    get_task(conn, id)
+}
+
+pub fn update_task(conn: &Connection, id: i64, patch: &TaskPatch) -> Result<Task> {
+    let existing = get_task(conn, id)?;
+
+    if let Some(title) = &patch.title {
+        if title.trim().is_empty() {
+            return Err(crate::error::Error::invalid("task title cannot be empty"));
+        }
+        conn.execute(
+            "UPDATE tasks SET title = ?2 WHERE id = ?1",
+            params![id, title.trim()],
+        )?;
+    }
+    if let Some(description) = &patch.description {
+        let value = description.trim();
+        conn.execute(
+            "UPDATE tasks SET description = ?2 WHERE id = ?1",
+            params![id, (!value.is_empty()).then_some(value)],
+        )?;
+    }
+    if let Some(category) = patch.category {
+        conn.execute(
+            "UPDATE tasks SET category = ?2 WHERE id = ?1",
+            params![id, category],
+        )?;
+    }
+    if let Some(status) = patch.status {
+        // Entering `completed` stamps the time; leaving it clears the stamp.
+        let completed_at = match (status.is_done(), existing.completed_at) {
+            (true, Some(previous)) => Some(previous),
+            (true, None) => Some(now()),
+            (false, _) => None,
+        };
+        conn.execute(
+            "UPDATE tasks SET status = ?2, completed_at = ?3 WHERE id = ?1",
+            params![id, status, completed_at],
+        )?;
+    }
+    if let Some(estimate) = patch.estimate_minutes {
+        conn.execute(
+            "UPDATE tasks SET estimate_minutes = ?2 WHERE id = ?1",
+            params![id, (estimate > 0).then_some(estimate)],
+        )?;
+    }
+    if let Some(criteria) = &patch.criteria {
+        replace_criteria(conn, id, criteria)?;
+    }
+    if let Some(files) = &patch.files {
+        replace_files(conn, id, files)?;
+    }
+    if let Some(depends_on) = &patch.depends_on {
+        replace_dependencies(conn, id, depends_on)?;
+    }
+
+    conn.execute(
+        "UPDATE tasks SET updated_at = ?2 WHERE id = ?1",
+        params![id, now()],
+    )?;
+    get_task(conn, id)
+}
+
+pub fn delete_task(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+pub fn reorder_tasks(conn: &Connection, project_id: i64, ordered_ids: &[i64]) -> Result<()> {
+    for (index, id) in ordered_ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE tasks SET position = ?3 WHERE id = ?1 AND project_id = ?2",
+            params![id, project_id, index as i64],
+        )?;
+    }
+    Ok(())
+}
+
+pub fn set_criterion_met(conn: &Connection, id: i64, is_met: bool) -> Result<i64> {
+    let task_id: i64 = conn
+        .query_row(
+            "SELECT task_id FROM task_acceptance_criteria WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .ok_or(crate::error::Error::NotFound("criterion"))?;
+    conn.execute(
+        "UPDATE task_acceptance_criteria SET is_met = ?2 WHERE id = ?1",
+        params![id, is_met as i64],
+    )?;
+    Ok(task_id)
+}
+
+// ----------------------------------------------------------- focus sessions
+
+pub fn open_focus_session(conn: &Connection, task_id: i64, planned_seconds: i64) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO focus_sessions (task_id, started_at, planned_seconds) VALUES (?1, ?2, ?3)",
+        params![task_id, now(), planned_seconds],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn record_focus_progress(
+    conn: &Connection,
+    session_id: i64,
+    elapsed_seconds: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE focus_sessions SET elapsed_seconds = ?2 WHERE id = ?1",
+        params![session_id, elapsed_seconds],
+    )?;
+    Ok(())
+}
+
+pub fn close_focus_session(
+    conn: &Connection,
+    session_id: i64,
+    elapsed_seconds: i64,
+    completed: bool,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE focus_sessions
+         SET ended_at = ?2, elapsed_seconds = ?3, completed = ?4
+         WHERE id = ?1",
+        params![session_id, now(), elapsed_seconds, completed as i64],
+    )?;
+    Ok(())
+}
+
+/// A session left open by a crash or quit, used to restore the timer on launch.
+pub fn latest_open_focus_session(conn: &Connection) -> Result<Option<(i64, i64, i64, i64)>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, task_id, planned_seconds, elapsed_seconds
+             FROM focus_sessions WHERE ended_at IS NULL
+             ORDER BY started_at DESC, id DESC LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?)
+}
+
+/// Any older open session is stale once one has been restored.
+pub fn close_stale_focus_sessions(conn: &Connection, except_id: Option<i64>) -> Result<()> {
+    conn.execute(
+        "UPDATE focus_sessions
+         SET ended_at = COALESCE(ended_at, started_at + elapsed_seconds)
+         WHERE ended_at IS NULL AND id IS NOT ?1",
+        params![except_id],
+    )?;
+    Ok(())
+}
+
+
+// ------------------------------------------------------------------- goals
+
+/// A goal's display name is the first line of what the developer typed.
+fn title_from_prompt(prompt: &str) -> String {
+    let first = prompt
+        .trim()
+        .lines()
+        .next()
+        .unwrap_or("Untitled goal")
+        .trim();
+    let sentence = first.split_once(". ").map(|(head, _)| head).unwrap_or(first);
+    let title: String = sentence.chars().take(72).collect();
+    if title.trim().is_empty() {
+        "Untitled goal".to_string()
+    } else {
+        title.trim().trim_end_matches('.').to_string()
+    }
+}
+
+fn goal_from_row(row: &Row) -> Result<Goal> {
+    let plan_json: Option<String> = row.get("plan_json")?;
+    Ok(Goal {
+        id: row.get("id")?,
+        project_id: row.get("project_id")?,
+        title: row.get("title")?,
+        prompt: row.get("prompt")?,
+        status: GoalStatus::parse_lenient(&row.get::<_, String>("status")?),
+        agent: crate::agent::Agent::parse_lenient(&row.get::<_, String>("agent")?),
+        codex_thread_id: row.get("codex_thread_id")?,
+        error: row.get("error")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+        // A plan written by an older build that no longer parses is treated as
+        // absent rather than poisoning the whole read.
+        plan: plan_json.and_then(|raw| serde_json::from_str(&raw).ok()),
+    })
+}
+
+pub fn create_goal(
+    conn: &Connection,
+    project_id: i64,
+    prompt: &str,
+    agent: crate::agent::Agent,
+) -> Result<Goal> {
+    let prompt = prompt.trim();
+    if prompt.is_empty() {
+        return Err(crate::error::Error::invalid("describe what you want to build"));
+    }
+    let ts = now();
+    conn.execute(
+        "INSERT INTO goals (project_id, title, prompt, status, agent, created_at, updated_at)
+         VALUES (?1, ?2, ?3, 'draft', ?4, ?5, ?5)",
+        params![project_id, title_from_prompt(prompt), prompt, agent, ts],
+    )?;
+    get_goal(conn, conn.last_insert_rowid())
+}
+
+pub fn get_goal(conn: &Connection, id: i64) -> Result<Goal> {
+    let mut stmt = conn.prepare("SELECT * FROM goals WHERE id = ?1")?;
+    let mut rows = stmt.query([id])?;
+    match rows.next()? {
+        Some(row) => goal_from_row(row),
+        None => Err(crate::error::Error::NotFound("goal")),
+    }
+}
+
+/// The goal the Goal screen should reopen on: the most recent one that still
+/// wants a decision, otherwise the most recent of any kind.
+pub fn latest_goal(conn: &Connection, project_id: i64) -> Result<Option<Goal>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM goals WHERE project_id = ?1
+         ORDER BY (status IN ('ready', 'analyzing', 'failed')) DESC, created_at DESC, id DESC
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query([project_id])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(goal_from_row(row)?)),
+        None => Ok(None),
+    }
+}
+
+pub fn set_goal_status(conn: &Connection, id: i64, status: GoalStatus) -> Result<Goal> {
+    conn.execute(
+        "UPDATE goals SET status = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, status, now()],
+    )?;
+    get_goal(conn, id)
+}
+
+pub fn set_goal_plan(
+    conn: &Connection,
+    id: i64,
+    thread_id: &str,
+    plan: &crate::plan::Plan,
+) -> Result<Goal> {
+    conn.execute(
+        "UPDATE goals
+         SET status = 'ready', plan_json = ?2, codex_thread_id = ?3, error = NULL, updated_at = ?4
+         WHERE id = ?1",
+        params![id, serde_json::to_string(plan)?, thread_id, now()],
+    )?;
+    get_goal(conn, id)
+}
+
+pub fn set_goal_failed(conn: &Connection, id: i64, error: &str) -> Result<Goal> {
+    conn.execute(
+        "UPDATE goals SET status = 'failed', error = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, error, now()],
+    )?;
+    get_goal(conn, id)
+}
+
+pub fn delete_goal(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("DELETE FROM goals WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+/// Writes an accepted plan out as real tasks, translating the plan's own
+/// 1-based `dependsOn` positions into task ids.
+pub fn create_tasks_from_plan(conn: &Connection, goal: &Goal) -> Result<Vec<Task>> {
+    let plan = goal
+        .plan
+        .as_ref()
+        .ok_or_else(|| crate::error::Error::invalid("that goal has no plan to add"))?;
+
+    let mut created: Vec<Task> = Vec::with_capacity(plan.tasks.len());
+    for planned in &plan.tasks {
+        let task = create_task(
+            conn,
+            &NewTask {
+                project_id: goal.project_id,
+                goal_id: Some(goal.id),
+                title: planned.title.clone(),
+                description: (!planned.description.is_empty())
+                    .then(|| planned.description.clone()),
+                category: Some(TaskCategory::parse_lenient(&planned.category)),
+                status: Some(TaskStatus::Ready),
+                estimate_minutes: (planned.estimate_minutes > 0)
+                    .then_some(planned.estimate_minutes),
+                is_ai_generated: Some(true),
+                criteria: Some(planned.acceptance_criteria.clone()),
+                files: Some(planned.relevant_files.clone()),
+            },
+        )?;
+        created.push(task);
+    }
+
+    for (index, planned) in plan.tasks.iter().enumerate() {
+        let ids: Vec<i64> = planned
+            .depends_on
+            .iter()
+            .filter_map(|position| created.get((*position as usize).checked_sub(1)?))
+            .map(|task| task.id)
+            .collect();
+        if !ids.is_empty() {
+            replace_dependencies(conn, created[index].id, &ids)?;
+        }
+    }
+
+    set_goal_status(conn, goal.id, GoalStatus::Accepted)?;
+    list_tasks(conn, goal.project_id)
+}
+
+// ---------------------------------------------------------------- settings
+
+fn read_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .optional()?)
+}
+
+fn write_setting(conn: &Connection, key: &str, value: &str) -> Result<()> {
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+pub fn get_settings(conn: &Connection) -> Result<Settings> {
+    let mut settings = Settings::default();
+    if let Some(raw) = read_setting(conn, "focus_minutes")? {
+        if let Ok(value) = raw.parse::<i64>() {
+            settings.focus_minutes = value.clamp(1, 240);
+        }
+    }
+    if let Some(raw) = read_setting(conn, "show_timer_in_menu_bar")? {
+        settings.show_timer_in_menu_bar = raw == "1";
+    }
+    if let Some(raw) = read_setting(conn, "hide_popup_on_blur")? {
+        settings.hide_popup_on_blur = raw == "1";
+    }
+    // A stale id (project since deleted) reads back as "no active project".
+    if let Some(raw) = read_setting(conn, "agent")? {
+        settings.agent = crate::agent::Agent::parse_lenient(&raw);
+    }
+    settings.codex_path = read_setting(conn, "codex_path")?.filter(|v| !v.trim().is_empty());
+    settings.claude_path = read_setting(conn, "claude_path")?.filter(|v| !v.trim().is_empty());
+    settings.claude_model = read_setting(conn, "claude_model")?.filter(|v| !v.trim().is_empty());
+    settings.codex_model = read_setting(conn, "codex_model")?.filter(|v| !v.trim().is_empty());
+    settings.active_project_id = match read_setting(conn, "active_project_id")? {
+        Some(raw) => raw
+            .parse::<i64>()
+            .ok()
+            .filter(|id| find_project(conn, *id).map(|p| p.is_some()).unwrap_or(false)),
+        None => None,
+    };
+    Ok(settings)
+}
+
+pub fn update_settings(conn: &Connection, patch: &SettingsPatch) -> Result<Settings> {
+    if let Some(minutes) = patch.focus_minutes {
+        write_setting(conn, "focus_minutes", &minutes.clamp(1, 240).to_string())?;
+    }
+    if let Some(show) = patch.show_timer_in_menu_bar {
+        write_setting(conn, "show_timer_in_menu_bar", if show { "1" } else { "0" })?;
+    }
+    if let Some(hide) = patch.hide_popup_on_blur {
+        write_setting(conn, "hide_popup_on_blur", if hide { "1" } else { "0" })?;
+    }
+    if let Some(agent) = patch.agent {
+        write_setting(conn, "agent", agent.as_str())?;
+    }
+    for (key, value) in [
+        ("codex_path", &patch.codex_path),
+        ("codex_model", &patch.codex_model),
+        ("claude_path", &patch.claude_path),
+        ("claude_model", &patch.claude_model),
+    ] {
+        match value {
+            Some(Some(text)) if !text.trim().is_empty() => {
+                write_setting(conn, key, text.trim())?;
+            }
+            Some(_) => {
+                conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+            }
+            None => {}
+        }
+    }
+    if let Some(active) = patch.active_project_id {
+        match active {
+            Some(id) => {
+                write_setting(conn, "active_project_id", &id.to_string())?;
+                touch_project(conn, id)?;
+            }
+            None => {
+                conn.execute("DELETE FROM settings WHERE key = 'active_project_id'", [])?;
+            }
+        }
+    }
+    get_settings(conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn memory_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+        migrate(&conn).expect("migrate");
+        conn
+    }
+
+    fn a_project(conn: &Connection) -> Project {
+        upsert_project(conn, "/tmp/demo", "demo", true, Some("main")).unwrap()
+    }
+
+    fn a_task(conn: &Connection, project_id: i64, title: &str) -> Task {
+        create_task(
+            conn,
+            &NewTask {
+                project_id,
+                title: title.to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn migrations_are_idempotent() {
+        let conn = memory_db();
+        migrate(&conn).unwrap();
+        let version: i64 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
+    }
+
+    #[test]
+    fn an_older_database_upgrades_instead_of_being_rebuilt() {
+        // Stand up a database at version 1 and carry a row across the upgrade.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(MIGRATIONS[0]).unwrap();
+        conn.pragma_update(None, "user_version", 1i64).unwrap();
+        conn.execute(
+            "INSERT INTO projects (path, name, is_git, created_at, last_opened_at)
+             VALUES ('/tmp/old', 'old', 1, 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO goals (project_id, title, prompt, status, created_at)
+             VALUES (1, 'Old goal', 'do a thing', 'draft', 1)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&conn).expect("upgrade should apply cleanly");
+
+        let goal = get_goal(&conn, 1).unwrap();
+        assert_eq!(goal.title, "Old goal");
+        assert_eq!(goal.plan_is_none(), true);
+    }
+
+    #[test]
+    fn a_goal_title_is_taken_from_the_first_line_of_the_prompt() {
+        assert_eq!(
+            title_from_prompt("Allow customers to download invoices as PDF. Also email them."),
+            "Allow customers to download invoices as PDF"
+        );
+        assert_eq!(title_from_prompt("   "), "Untitled goal");
+    }
+
+    #[test]
+    fn accepting_a_plan_creates_tasks_and_wires_their_dependencies() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let goal = create_goal(&conn, project.id, "Download invoices as PDF", Default::default()).unwrap();
+
+        let plan = crate::plan::Plan {
+            summary: "…".into(),
+            existing: vec![],
+            missing: vec![],
+            tasks: vec![
+                crate::plan::PlannedTask {
+                    title: "PDF service".into(),
+                    category: "backend".into(),
+                    acceptance_criteria: vec!["Renders a PDF".into()],
+                    relevant_files: vec!["src/pdf.ts".into()],
+                    estimate_minutes: 45,
+                    ..Default::default()
+                },
+                crate::plan::PlannedTask {
+                    title: "Download endpoint".into(),
+                    category: "backend".into(),
+                    depends_on: vec![1],
+                    ..Default::default()
+                },
+            ],
+        };
+        let goal = set_goal_plan(&conn, goal.id, "thread-1", &plan).unwrap();
+
+        let tasks = create_tasks_from_plan(&conn, &goal).unwrap();
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks[0].is_ai_generated);
+        assert_eq!(tasks[0].criteria.len(), 1);
+        assert_eq!(tasks[0].files, vec!["src/pdf.ts"]);
+        // The plan's 1-based position became the first task's real id.
+        assert_eq!(tasks[1].depends_on, vec![tasks[0].id]);
+        assert_eq!(get_goal(&conn, goal.id).unwrap().status, GoalStatus::Accepted);
+    }
+
+    #[test]
+    fn a_goal_awaiting_a_decision_outranks_a_newer_finished_one() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let ready = create_goal(&conn, project.id, "Needs a decision", Default::default()).unwrap();
+        set_goal_status(&conn, ready.id, GoalStatus::Ready).unwrap();
+        let done = create_goal(&conn, project.id, "Already accepted", Default::default()).unwrap();
+        set_goal_status(&conn, done.id, GoalStatus::Accepted).unwrap();
+
+        let latest = latest_goal(&conn, project.id).unwrap().unwrap();
+        assert_eq!(latest.id, ready.id);
+    }
+
+    #[test]
+    fn re_adding_a_path_updates_rather_than_duplicates() {
+        let conn = memory_db();
+        let first = a_project(&conn);
+        let second = upsert_project(&conn, "/tmp/demo", "demo", true, Some("feature/x")).unwrap();
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.branch.as_deref(), Some("feature/x"));
+        assert_eq!(list_projects(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn new_tasks_append_to_the_end_of_the_list() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let first = a_task(&conn, project.id, "first");
+        let second = a_task(&conn, project.id, "second");
+        assert_eq!((first.position, second.position), (0, 1));
+    }
+
+    #[test]
+    fn a_blank_title_is_rejected() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let result = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                title: "   ".to_string(),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rewriting_criteria_keeps_the_state_of_unchanged_lines() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                title: "PDF service".to_string(),
+                criteria: Some(vec!["Generate PDF".into(), "Handle errors".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        set_criterion_met(&conn, task.criteria[0].id, true).unwrap();
+
+        let updated = update_task(
+            &conn,
+            task.id,
+            &TaskPatch {
+                criteria: Some(vec![
+                    "Generate PDF".into(),
+                    "Handle errors".into(),
+                    "Write tests".into(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert!(updated.criteria[0].is_met, "unchanged line keeps its tick");
+        assert!(!updated.criteria[1].is_met);
+        assert!(!updated.criteria[2].is_met);
+    }
+
+    #[test]
+    fn completing_stamps_the_time_and_reopening_clears_it() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = a_task(&conn, project.id, "ship it");
+
+        let done = update_task(
+            &conn,
+            task.id,
+            &TaskPatch {
+                status: Some(TaskStatus::Completed),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(done.completed_at.is_some());
+
+        let reopened = update_task(
+            &conn,
+            task.id,
+            &TaskPatch {
+                status: Some(TaskStatus::Ready),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(reopened.completed_at, None);
+    }
+
+    #[test]
+    fn reordering_rewrites_positions_in_the_given_order() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let first = a_task(&conn, project.id, "first");
+        let second = a_task(&conn, project.id, "second");
+        let third = a_task(&conn, project.id, "third");
+
+        reorder_tasks(&conn, project.id, &[third.id, first.id, second.id]).unwrap();
+
+        let titles: Vec<String> = list_tasks(&conn, project.id)
+            .unwrap()
+            .into_iter()
+            .map(|task| task.title)
+            .collect();
+        assert_eq!(titles, vec!["third", "first", "second"]);
+    }
+
+    #[test]
+    fn a_task_cannot_depend_on_itself() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = a_task(&conn, project.id, "loop");
+        let result = update_task(
+            &conn,
+            task.id,
+            &TaskPatch {
+                depends_on: Some(vec![task.id]),
+                ..Default::default()
+            },
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn deleting_a_project_takes_its_tasks_with_it() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        a_task(&conn, project.id, "orphan");
+        delete_project(&conn, project.id).unwrap();
+        assert!(list_tasks(&conn, project.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn focus_time_accumulates_across_sessions() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = a_task(&conn, project.id, "deep work");
+
+        let first = open_focus_session(&conn, task.id, 1500).unwrap();
+        close_focus_session(&conn, first, 900, false).unwrap();
+        let second = open_focus_session(&conn, task.id, 1500).unwrap();
+        close_focus_session(&conn, second, 600, true).unwrap();
+
+        assert_eq!(get_task(&conn, task.id).unwrap().focus_seconds, 1500);
+    }
+
+    #[test]
+    fn only_the_restored_session_is_left_open() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = a_task(&conn, project.id, "interrupted");
+        let stale = open_focus_session(&conn, task.id, 1500).unwrap();
+        let current = open_focus_session(&conn, task.id, 1500).unwrap();
+
+        let open = latest_open_focus_session(&conn).unwrap().unwrap();
+        assert_eq!(open.0, current);
+
+        close_stale_focus_sessions(&conn, Some(current)).unwrap();
+        let still_open: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM focus_sessions WHERE ended_at IS NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(still_open, 1);
+        assert_ne!(open.0, stale);
+    }
+
+    #[test]
+    fn settings_round_trip_and_clamp_out_of_range_values() {
+        let conn = memory_db();
+        let saved = update_settings(
+            &conn,
+            &SettingsPatch {
+                focus_minutes: Some(9_000),
+                show_timer_in_menu_bar: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(saved.focus_minutes, 240);
+        assert!(!saved.show_timer_in_menu_bar);
+        assert!(saved.hide_popup_on_blur, "untouched keys keep their default");
+    }
+
+    #[test]
+    fn an_active_project_that_was_deleted_reads_back_as_none() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        update_settings(
+            &conn,
+            &SettingsPatch {
+                active_project_id: Some(Some(project.id)),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        delete_project(&conn, project.id).unwrap();
+        assert_eq!(get_settings(&conn).unwrap().active_project_id, None);
+    }
+}
