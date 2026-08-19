@@ -5,6 +5,10 @@ import type {
   AgentStatus,
   AnalysisSnapshot,
   Bootstrap,
+  ExecutionSnapshot,
+  RepoChanges,
+  Stats,
+  VerificationSnapshot,
   Goal,
   FocusSnapshot,
   NewTask,
@@ -55,6 +59,8 @@ export const ipc = {
   resumeFocus: () => invoke<FocusSnapshot>("resume_focus"),
   stopFocus: () => invoke<FocusSnapshot>("stop_focus"),
 
+  performanceStats: () => invoke<Stats>("performance_stats"),
+
   getSettings: () => invoke<Settings>("get_settings"),
   updateSettings: (patch: SettingsPatch) =>
     invoke<Settings>("update_settings", { patch }),
@@ -72,9 +78,28 @@ export const ipc = {
   acceptPlan: (goalId: number) => invoke<Task[]>("accept_plan", { goalId }),
   discardPlan: (goalId: number) => invoke<void>("discard_plan", { goalId }),
 
+  executionSnapshot: () => invoke<ExecutionSnapshot>("execution_snapshot"),
+  taskHasThread: (taskId: number) => invoke<boolean>("task_has_thread", { taskId }),
+  startExecution: (taskId: number, resume = false) =>
+    invoke<Task>("start_execution", { taskId, resume }),
+  stopExecution: () => invoke<ExecutionSnapshot>("stop_execution"),
+  respondToApproval: (approve: boolean) =>
+    invoke<ExecutionSnapshot>("respond_to_approval", { approve }),
+  clearExecution: () => invoke<ExecutionSnapshot>("clear_execution"),
+
+  repoChanges: () => invoke<RepoChanges>("repo_changes"),
+  fileDiff: (path: string) => invoke<string>("file_diff", { path }),
+
+  verificationSnapshot: () => invoke<VerificationSnapshot>("verification_snapshot"),
+  startVerification: (taskId: number) =>
+    invoke<VerificationSnapshot>("start_verification", { taskId }),
+  cancelVerification: () => invoke<VerificationSnapshot>("cancel_verification"),
+
   popupShortcut: () => invoke<ShortcutInfo>("popup_shortcut"),
 
   hidePopup: () => invoke<void>("hide_popup"),
+  openDesktopWindow: () => invoke<void>("open_desktop_window"),
+  hideDesktopWindow: () => invoke<void>("hide_desktop_window"),
   resizePopup: (height: number) => invoke<void>("resize_popup", { height }),
   quitApp: () => invoke<void>("quit_app"),
 };

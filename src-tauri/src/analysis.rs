@@ -5,7 +5,8 @@
 
 use crate::plan::AnalysisStep;
 use serde::Serialize;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 /// Keeps the progress list short enough to read at a glance.
 const MAX_STEPS: usize = 12;
@@ -36,15 +37,25 @@ pub struct AnalysisSnapshot {
 #[derive(Default)]
 struct Analysis {
     snapshot: AnalysisSnapshot,
-    cancelled: bool,
 }
 
+/// The cancel flag lives outside the mutex and is shared, so a worker can hand
+/// a clone to whatever needs to notice a cancellation — including a thread
+/// whose only job is to kill a child process that has gone quiet.
 #[derive(Default)]
-pub struct AnalysisState(Mutex<Analysis>);
+pub struct AnalysisState {
+    inner: Mutex<Analysis>,
+    cancelled: Arc<AtomicBool>,
+}
 
 impl AnalysisState {
     fn lock(&self) -> std::sync::MutexGuard<'_, Analysis> {
-        self.0.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A handle the worker can carry; it stays valid across `clear`.
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.cancelled.clone()
     }
 
     pub fn snapshot(&self) -> AnalysisSnapshot {
@@ -56,12 +67,12 @@ impl AnalysisState {
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.lock().cancelled
+        self.cancelled.load(Ordering::SeqCst)
     }
 
     pub fn begin(&self, goal_id: i64, project_id: i64, goal_title: String) -> AnalysisSnapshot {
+        self.cancelled.store(false, Ordering::SeqCst);
         let mut analysis = self.lock();
-        analysis.cancelled = false;
         analysis.snapshot = AnalysisSnapshot {
             status: AnalysisStatus::Running,
             goal_id: Some(goal_id),
@@ -138,12 +149,13 @@ impl AnalysisState {
         Some(analysis.snapshot.clone())
     }
 
-    /// Asks the worker to stop; it notices between notifications.
+    /// Asks the worker to stop. Shared, so a killer thread sees it too.
     pub fn request_cancel(&self) {
-        self.lock().cancelled = true;
+        self.cancelled.store(true, Ordering::SeqCst);
     }
 
     pub fn clear(&self) -> AnalysisSnapshot {
+        self.cancelled.store(false, Ordering::SeqCst);
         let mut analysis = self.lock();
         *analysis = Analysis::default();
         analysis.snapshot.clone()

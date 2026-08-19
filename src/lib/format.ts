@@ -16,6 +16,19 @@ export function formatDuration(minutes: number): string {
   return rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
 }
 
+/**
+ * A span of time in the units a person would say it in: `1h 15m`, `45m`,
+ * `30s`. Used for totals, where a `mm:ss` clock stops being readable.
+ */
+export function formatSpan(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  if (total < 60) return `${total}s`;
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (hours === 0) return `${minutes}m`;
+  return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
+}
+
 /** Shortens a path for display: `~/projects/my-app`. */
 export function shortenPath(path: string, home = "/Users"): string {
   const parts = path.split("/");

@@ -4,10 +4,19 @@ import { computed, ref } from "vue";
 import { errorMessage, ipc } from "../lib/ipc";
 import type { Project, Settings, SettingsPatch } from "../types";
 import { useAgentStore } from "./agent";
+import { useExecutionStore } from "./execution";
 import { useFocusStore } from "./focus";
+import { useReviewStore } from "./review";
 import { useTasksStore } from "./tasks";
 
-export type View = "today" | "task" | "projects" | "goal" | "settings";
+export type View =
+  | "today"
+  | "task"
+  | "projects"
+  | "goal"
+  | "settings"
+  | "changes"
+  | "onboarding";
 
 const DEFAULT_SETTINGS: Settings = {
   focusMinutes: 25,
@@ -19,15 +28,23 @@ const DEFAULT_SETTINGS: Settings = {
   codexModel: null,
   claudePath: null,
   claudeModel: null,
+  theme: "light",
+  notifications: true,
+  launchAtLogin: false,
+  onboarded: false,
 };
 
 export const useAppStore = defineStore("app", () => {
   const ready = ref(false);
   const error = ref<string | null>(null);
+  /** Set when startup itself failed, so the UI can offer a way back. */
+  const failed = ref(false);
   const settings = ref<Settings>({ ...DEFAULT_SETTINGS });
   const projects = ref<Project[]>([]);
   const activeProject = ref<Project | null>(null);
 
+  /** True on the desktop window, which has room for more than the popup. */
+  const isDesktop = ref(false);
   const view = ref<View>("today");
   const selectedTaskId = ref<number | null>(null);
 
@@ -51,6 +68,7 @@ export const useAppStore = defineStore("app", () => {
     const focus = useFocusStore();
     try {
       error.value = null;
+      failed.value = false;
       const data = await ipc.bootstrap();
       settings.value = data.settings;
       projects.value = data.projects;
@@ -60,10 +78,17 @@ export const useAppStore = defineStore("app", () => {
       const codex = useAgentStore();
       codex.setAnalysis(data.analysis);
       codex.setGoal(data.goal);
-      // Land on project selection when there is nothing to show yet.
-      view.value = data.activeProject ? "today" : "projects";
+      useExecutionStore().set(data.execution);
+      useReviewStore().set(data.verification);
+      // First run walks through setup; after that, straight to the work.
+      view.value = !data.settings.onboarded
+        ? "onboarding"
+        : data.activeProject
+          ? "today"
+          : "projects";
     } catch (caught) {
       error.value = errorMessage(caught);
+      failed.value = true;
     } finally {
       ready.value = true;
     }
@@ -81,10 +106,14 @@ export const useAppStore = defineStore("app", () => {
     const stopCodex = await codex.subscribe(() => {
       void codex.refreshGoal(activeProject.value?.id ?? null);
     });
+    const stopExecution = await useExecutionStore().subscribe();
+    const stopReview = await useReviewStore().subscribe();
     return () => {
       stopTasks();
       stopFocus();
       stopCodex();
+      stopExecution();
+      stopReview();
     };
   }
 
@@ -173,6 +202,8 @@ export const useAppStore = defineStore("app", () => {
   return {
     ready,
     error,
+    failed,
+    isDesktop,
     settings,
     projects,
     activeProject,

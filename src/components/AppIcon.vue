@@ -15,6 +15,7 @@ const PATHS: Record<string, string> = {
   branch: "M7 4v10m0 0a3 3 0 003 3h4a3 3 0 003-3V8M7 14a2 2 0 100 4 2 2 0 000-4zm0-12a2 2 0 110 4 2 2 0 010-4zm10 2a2 2 0 110 4 2 2 0 010-4z",
   close: "M6 6l12 12M18 6L6 18",
   chevron: "M6 9.5l6 6 6-6",
+  expand: "M14 4h6v6M20 4l-7 7M10 20H4v-6M4 20l7-7",
 };
 
 defineProps<{

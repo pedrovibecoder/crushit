@@ -66,3 +66,11 @@ setTimeout(() => {
     String(panel ? Math.ceil(panel.getBoundingClientRect().height) : 0),
   );
 }, 900);
+
+// `?diff=1` opens the first changed file's diff.
+if (params.get("diff")) {
+  setTimeout(async () => {
+    const { useReviewStore } = await import("../src/stores/review");
+    void useReviewStore().openDiff("src/permissions/keys.ts");
+  }, 400);
+}

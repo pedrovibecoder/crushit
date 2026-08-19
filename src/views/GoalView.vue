@@ -74,7 +74,7 @@ async function discard() {
       @back="app.back()"
     />
 
-    <div class="max-h-[380px] overflow-y-auto px-3.5 pb-3.5">
+    <div class="panel-scroll px-3.5 pb-3.5">
       <!-- Codex missing or signed out -->
       <template v-if="stage === 'unavailable'">
         <div class="card px-3 py-3">

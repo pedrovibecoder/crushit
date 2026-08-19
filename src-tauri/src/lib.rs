@@ -4,16 +4,23 @@ pub mod claude;
 pub mod codex;
 mod commands;
 mod db;
+pub mod desktop;
 mod error;
+pub mod execution;
 mod focus;
-mod models;
+pub mod models;
+mod notify;
 pub mod plan;
 mod popup;
-mod repo;
+pub mod run;
+pub mod verify;
+pub mod repo;
 mod shortcut;
 mod tray;
 
 use analysis::AnalysisState;
+use execution::ExecutionState;
+use verify::VerificationState;
 use codex::CodexClient;
 use commands::FocusState;
 use db::Db;
@@ -34,6 +41,8 @@ const PERSIST_EVERY: Duration = Duration::from_secs(15);
 /// Longer than any analysis is allowed to take, with room to spare. Past this
 /// a run is presumed dead so the menu bar recovers on its own.
 const ANALYSIS_STALL_SECONDS: i64 = 15 * 60;
+/// The same backstop for an implementation run, which is allowed longer.
+const RUN_STALL_SECONDS: i64 = 35 * 60;
 /// The tray reads one setting; re-querying it four times a second would hold
 /// the database lock against the UI for no benefit.
 const SETTINGS_REFRESH: Duration = Duration::from_secs(2);
@@ -43,6 +52,11 @@ pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, pressed, event| {
@@ -73,9 +87,13 @@ pub fn run() {
             commands::pause_focus,
             commands::resume_focus,
             commands::stop_focus,
+            commands::performance_stats,
             commands::get_settings,
             commands::update_settings,
             commands::hide_popup,
+            commands::open_desktop_window,
+            commands::hide_desktop_window,
+            commands::desktop_window_open,
             commands::resize_popup,
             commands::quit_app,
             commands::popup_shortcut,
@@ -87,6 +105,17 @@ pub fn run() {
             commands::cancel_analysis,
             commands::accept_plan,
             commands::discard_plan,
+            commands::execution_snapshot,
+            commands::task_has_thread,
+            commands::repo_changes,
+            commands::file_diff,
+            commands::verification_snapshot,
+            commands::start_verification,
+            commands::cancel_verification,
+            commands::start_execution,
+            commands::stop_execution,
+            commands::respond_to_approval,
+            commands::clear_execution,
         ])
         .setup(|app| {
             // The app lives in the menu bar: no dock icon, no app switcher entry.
@@ -106,25 +135,43 @@ pub fn run() {
             app.manage(AnalysisState::default());
             app.manage(shortcut::ShortcutState::default());
             app.manage(agent::StatusCache::default());
+            app.manage(ExecutionState::default());
+            app.manage(VerificationState::default());
 
             build_tray(app.handle())?;
             shortcut::register(app.handle());
             popup::prewarm(app.handle());
+            desktop::restore(app.handle());
             spawn_timer_thread(app.handle().clone());
             Ok(())
         })
-        .on_window_event(|window, event| match event {
-            // Closing the popup must never quit the app or end a session.
-            WindowEvent::CloseRequested { api, .. } => {
-                api.prevent_close();
-                let _ = window.hide();
-            }
-            WindowEvent::Focused(false) => {
-                if should_hide_on_blur(window.app_handle()) {
-                    let _ = window.hide();
+        .on_window_event(|window, event| {
+            let is_desktop = window.label() == desktop::WINDOW_LABEL;
+            match event {
+                // Closing either surface returns to the menu bar rather than
+                // quitting, and never stops a running task.
+                WindowEvent::CloseRequested { api, .. } => {
+                    api.prevent_close();
+                    if is_desktop {
+                        let _ = desktop::hide(window.app_handle());
+                    } else {
+                        let _ = window.hide();
+                    }
                 }
+                // Only the popup behaves like a menu-bar extra.
+                WindowEvent::Focused(false) => {
+                    if !is_desktop && should_hide_on_blur(window.app_handle()) {
+                        let _ = window.hide();
+                    }
+                }
+                // Remember where the developer put the window.
+                WindowEvent::Moved(_) | WindowEvent::Resized(_) => {
+                    if is_desktop && desktop::is_open(window.app_handle()) {
+                        desktop::remember(window.app_handle(), true);
+                    }
+                }
+                _ => {}
             }
-            _ => {}
         })
         .build(tauri::generate_context!())
         .expect("failed to start Blitzit");
@@ -226,17 +273,33 @@ fn menu_bar_state(
     showing_done: bool,
     show_timer: bool,
 ) -> MenuBarState {
-    // A focus session is the developer's own clock, so it outranks Codex.
-    let analysing = app
+    let execution = app.try_state::<ExecutionState>();
+    // An agent blocked on a question needs answering before anything else is
+    // worth showing, so it outranks even the focus clock.
+    if execution
+        .as_ref()
+        .map(|state| state.is_awaiting_approval())
+        .unwrap_or(false)
+    {
+        return MenuBarState::AwaitingApproval;
+    }
+
+    // Otherwise a focus session is the developer's own clock and comes first.
+    let working = app
         .try_state::<AnalysisState>()
         .map(|state| state.is_running())
-        .unwrap_or(false);
+        .unwrap_or(false)
+        || app
+            .try_state::<VerificationState>()
+            .map(|state| state.is_running())
+            .unwrap_or(false)
+        || execution.map(|state| state.is_active()).unwrap_or(false);
 
     match snapshot.status {
-        FocusStatus::Idle if analysing => MenuBarState::Coding,
+        FocusStatus::Idle if working => MenuBarState::Coding,
         FocusStatus::Idle => MenuBarState::Idle,
         FocusStatus::Finished if showing_done => MenuBarState::Done,
-        FocusStatus::Finished if analysing => MenuBarState::Coding,
+        FocusStatus::Finished if working => MenuBarState::Coding,
         FocusStatus::Finished => MenuBarState::Idle,
         FocusStatus::Running | FocusStatus::Paused => {
             if show_timer {
@@ -272,10 +335,32 @@ fn spawn_timer_thread(app: AppHandle) {
                 let _ = app.emit("codex:analysis", &stalled);
                 let _ = app.emit("goals:changed", ());
             }
+            if let Some(stalled) = app
+                .try_state::<ExecutionState>()
+                .and_then(|state| state.fail_if_stalled(RUN_STALL_SECONDS))
+            {
+                let _ = app.emit("execution:changed", &stalled);
+            }
+            if let Some(stalled) = app
+                .try_state::<VerificationState>()
+                .and_then(|state| state.fail_if_stalled(ANALYSIS_STALL_SECONDS))
+            {
+                let _ = app.emit("verification:changed", &stalled);
+            }
 
             if just_finished {
                 finished_at = Some(Instant::now());
                 let _ = app.emit("focus:finished", &snapshot);
+                // The popup is very likely closed when a session runs out.
+                let title = snapshot
+                    .task_id
+                    .and_then(|id| {
+                        let db = app.try_state::<Db>()?;
+                        let conn = db.conn();
+                        db::get_task(&conn, id).ok().map(|task| task.title)
+                    })
+                    .unwrap_or_else(|| "Your task".to_string());
+                notify::send(&app, notify::Event::FocusFinished { task: &title });
             }
             if snapshot.status == FocusStatus::Idle {
                 finished_at = None;

@@ -34,7 +34,8 @@ const TASKS = [
     ],
     files: ["src/services/invoice.ts", "src/models/invoice.ts"],
     dependsOn: [],
-    focusSeconds: 1800,
+    focusSeconds: 4500,
+    focusSessions: 3,
   },
   {
     id: 2,
@@ -54,6 +55,7 @@ const TASKS = [
     files: [],
     dependsOn: [1],
     focusSeconds: 0,
+    focusSessions: 0,
   },
   {
     id: 3,
@@ -73,6 +75,7 @@ const TASKS = [
     files: [],
     dependsOn: [2],
     focusSeconds: 0,
+    focusSessions: 0,
   },
   {
     id: 4,
@@ -92,6 +95,7 @@ const TASKS = [
     files: [],
     dependsOn: [],
     focusSeconds: 0,
+    focusSessions: 0,
   },
   {
     id: 5,
@@ -111,6 +115,7 @@ const TASKS = [
     files: [],
     dependsOn: [],
     focusSeconds: 0,
+    focusSessions: 0,
   },
 ];
 
@@ -124,6 +129,10 @@ const SETTINGS = {
   codexModel: null,
   claudePath: null,
   claudeModel: null,
+  theme: new URLSearchParams(location.search).get("theme") ?? "light",
+  notifications: true,
+  launchAtLogin: false,
+  onboarded: new URLSearchParams(location.search).get("view") !== "onboarding",
 };
 
 const FOCUS = {
@@ -233,6 +242,106 @@ const AGENT_STATUS = {
   problem: STATE === "nocodex" ? "Codex CLI not found. Install it, or set its path in Settings." : null,
 };
 
+const RUN = {
+  status:
+    STATE === "approval"
+      ? "awaiting-approval"
+      : STATE === "running"
+        ? "running"
+        : STATE === "ran"
+          ? "finished"
+          : "idle",
+  taskId: 1,
+  taskTitle: "Wire real permission key into customer menu entry",
+  agent: SETTINGS.agent,
+  threadId: "01a017c8-e344-7222-9061-610c601abe7e",
+  activity: [
+    { id: "1", label: "Reading permissions.ts", kind: "read", done: true },
+    { id: "2", label: "Running npm test", kind: "command", done: true },
+    { id: "3", label: "Editing customer-menu.ts", kind: "file", done: false },
+  ],
+  changedFiles: ["src/menu/customer.ts", "src/permissions/keys.ts"],
+  approval:
+    STATE === "approval"
+      ? {
+          id: 7,
+          title: "Run command?",
+          command: "npm install pdf-lib",
+          reason: "Required for PDF generation.",
+        }
+      : null,
+  summary:
+    STATE === "ran"
+      ? "Added the permission key and wired it into the customer menu entry. Tests pass."
+      : null,
+  error: null,
+  startedAt: Math.floor(Date.now() / 1000) - 272,
+};
+
+const VERIFICATION = {
+  status: STATE === "verified" ? "ready" : STATE === "verifying" ? "running" : "idle",
+  taskId: 1,
+  taskTitle: "Wire real permission key into customer menu entry",
+  steps: [
+    { id: "1", label: "Reading permissions.ts", done: true },
+    { id: "2", label: "Searching for menu registration", done: false },
+  ],
+  result:
+    STATE === "verified"
+      ? {
+          summary: "The key is wired up, but nothing covers it.",
+          complete: false,
+          criteria: [
+            {
+              text: "Menu entry uses the real permission key",
+              satisfied: true,
+              evidence: "src/menu/customer.ts line 42 reads PERMISSIONS.customer.view.",
+            },
+            {
+              text: "Unauthorised users cannot see the entry",
+              satisfied: true,
+              evidence: "Guarded by hasPermission() in src/menu/index.ts.",
+            },
+            {
+              text: "A test covers the permission check",
+              satisfied: false,
+              evidence: "No test references the customer menu entry.",
+            },
+          ],
+        }
+      : null,
+  satisfied: 2,
+  total: 3,
+  recommendation: "Keep task open.",
+  error: null,
+  startedAt: Math.floor(Date.now() / 1000) - 40,
+};
+
+const CHANGES = {
+  isGit: true,
+  insertions: 182,
+  deletions: 24,
+  files: [
+    { path: "src/menu/customer.ts", state: "modified", insertions: 46, deletions: 12 },
+    { path: "src/permissions/keys.ts", state: "modified", insertions: 8, deletions: 2 },
+    { path: "src/pages/customer/table.vue", state: "added", insertions: 118, deletions: 0 },
+    { path: "src/legacy/customer-old.ts", state: "deleted", insertions: 0, deletions: 10 },
+    { path: "notes.md", state: "untracked", insertions: 10, deletions: 0 },
+  ],
+};
+
+const DIFF = `--- a/src/permissions/keys.ts
++++ b/src/permissions/keys.ts
+@@ -12,7 +12,9 @@ export const PERMISSIONS = {
+   invoice: {
+     view: "invoice.view",
+   },
+-  customer: {},
++  customer: {
++    view: "customer.view",
++  },
+ };`;
+
 export async function invoke(command: string): Promise<unknown> {
   switch (command) {
     case "bootstrap":
@@ -244,6 +353,8 @@ export async function invoke(command: string): Promise<unknown> {
         focus: FOCUS,
         analysis: ANALYSIS,
         goal: GOAL,
+        execution: RUN,
+        verification: VERIFICATION,
       };
     case "list_tasks":
       return TASKS;
@@ -270,6 +381,23 @@ export async function invoke(command: string): Promise<unknown> {
       return GOAL;
     case "analysis_snapshot":
       return ANALYSIS;
+    case "execution_snapshot":
+      return RUN;
+    case "task_has_thread":
+      return STATE === "ran";
+    case "verification_snapshot":
+      return VERIFICATION;
+    case "performance_stats":
+      return {
+        focusTodaySeconds: 7500,
+        tasksDoneWeek: 6,
+        sessionsWeek: 14,
+        averageSessionSeconds: 1380,
+      };
+    case "repo_changes":
+      return CHANGES;
+    case "file_diff":
+      return DIFF;
     default:
       return undefined;
   }
@@ -280,7 +408,10 @@ export async function listen(): Promise<() => void> {
 }
 
 export function getCurrentWindow() {
-  return { onFocusChanged: async () => () => {} };
+  return {
+    label: new URLSearchParams(location.search).get("surface") ?? "popup",
+    onFocusChanged: async () => () => {},
+  };
 }
 
 export async function open(): Promise<string | null> {

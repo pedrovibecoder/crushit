@@ -3,7 +3,7 @@
 
 **Status:** Draft  
 **Platform:** macOS first  
-**Product Type:** Menu-bar developer productivity application  
+**Product Type:** Menu-bar developer productivity application with a desktop window  
 **Frontend:** Vue 3 + TypeScript  
 **Desktop Framework:** Tauri 2  
 **Coding Agent:** OpenAI Codex only  
@@ -164,7 +164,14 @@ Repository access and development execution should occur locally during the MVP.
 
 # 6. Core User Experience
 
-The normal application should not require a large window.
+The application has **two surfaces over one running app**:
+
+- a **menu-bar popup** for the quick question — what am I on, start it, stop it;
+- a **desktop window** for the longer sitting — writing a goal, reading a
+  generated plan, watching activity, reviewing a diff.
+
+Day to day the application should not require a large window. The popup is the
+default, and nothing forces the window open.
 
 The primary UI lives in the macOS menu bar.
 
@@ -195,6 +202,21 @@ Clicking it opens:
 ```
 
 The developer should be able to understand their current work within approximately 2–3 seconds of opening the menu.
+
+The same click target opens the window when the developer wants room:
+
+```text
+┌─────────────────────────────────┐
+│ TODAY                           │
+│ ...                             │
+│ ──────────────────────────────  │
+│ + Task    ✦ New Goal    ⤢ Open │
+└─────────────────────────────────┘
+```
+
+**⤢ Open** raises the desktop window described in section 36. The window may
+also be opened from the tray menu, and closing it returns the application to
+the menu bar without quitting.
 
 ---
 
@@ -776,11 +798,13 @@ Authentication remains managed by Codex.
 # 22. Application Architecture
 
 ```text
-┌──────────────────────────────┐
-│       macOS Menu Bar         │
-└──────────────┬───────────────┘
-               │
-               ▼
+┌──────────────────────────────┐      ┌──────────────────────────────┐
+│       macOS Menu Bar         │      │      Desktop Window          │
+│         (popup)              │      │        (optional)            │
+└──────────────┬───────────────┘      └──────────────┬───────────────┘
+               │                                     │
+               └──────────────┬──────────────────────┘
+                              ▼
 ┌──────────────────────────────┐
 │ Vue 3 + TypeScript           │
 │                              │
@@ -789,6 +813,7 @@ Authentication remains managed by Codex.
 │ Tasks                        │
 │ Focus                        │
 │ Codex Activity               │
+│ Changes                      │
 └──────────────┬───────────────┘
                │
                ▼
@@ -942,6 +967,10 @@ Live Codex activity and changed files.
 
 Project configuration, Codex status, timer settings, and preferences.
 
+Both surfaces render the same five screens from the same state. The window is
+not a different product: it is the same screens with room to breathe, and any
+change made in one is visible in the other immediately.
+
 A traditional project-management dashboard is explicitly not required for the MVP.
 
 ---
@@ -1004,6 +1033,17 @@ Codex compares the implementation against acceptance criteria.
 
 User controls final task completion.
 
+## FR-15 Desktop Window
+
+User can open a resizable desktop window showing the same screens as the
+popup, and can return the application to the menu bar without quitting.
+
+## FR-16 Goal Composition In The Window
+
+Writing a goal and reviewing the generated plan is comfortable at window size:
+the goal field is multi-line, and the plan is readable without scrolling a
+320-pixel column.
+
 ---
 
 # 28. Non-Functional Requirements
@@ -1028,7 +1068,8 @@ Application restart must recover:
 - goals;
 - tasks;
 - timers;
-- stored Codex thread IDs.
+- stored Codex thread IDs;
+- whether the desktop window was open, and its size and position.
 
 ### Safety
 
@@ -1051,7 +1092,8 @@ Do **not** build the following in V1:
 - automatic pull requests
 - cloud synchronization
 - mobile application
-- Windows version
+- Windows version (the operating system; the macOS desktop window in section 36
+  is in scope)
 - multiple simultaneous coding agents
 - autonomous task execution
 - automatic deployment
@@ -1191,6 +1233,23 @@ Menu-bar timer
 
 ---
 
+## Phase 6 — Desktop Window
+
+Build:
+
+```text
+Desktop window
+Open from popup and tray
+Hide to menu bar
+Window layout for goal and plan
+Window state recovery
+```
+
+The window reuses the existing screens. If it needs new screens, the popup is
+missing something and that gap should be closed first.
+
+---
+
 # 33. Suggested MVP Development Order
 
 ```text
@@ -1233,6 +1292,12 @@ Menu-bar timer
 19 task verification
 
 20 onboarding + polish
+
+21 desktop window shell
+
+22 open / hide to menu bar
+
+23 window layout for goal + plan
 ```
 
 ---
@@ -1288,3 +1353,90 @@ The application therefore sits between **project planning** and **AI coding exec
 > **Set the goal. Let your codebase create the plan. Focus on one task. Let Codex help execute it.**
 
 The application should feel less like Jira and more like a small developer companion that is always available from the menu bar.
+
+---
+
+# 36. Desktop Window
+
+## Why
+
+The menu bar is right for *checking in*: what am I on, start it, stop it, is it
+waiting on me. It is wrong for *sitting down*: writing a goal in a 320-pixel
+column, reading an eight-task plan, following live activity, or looking at a
+diff.
+
+Both belong to the same application. The window is the same product with room.
+
+## Opening and closing
+
+```text
+Popup footer            ⤢ Open
+Tray right-click        Open Blitzit
+Keyboard                the popup shortcut, pressed with the popup already open
+```
+
+Closing the window returns the application to the menu bar. It does **not**
+quit, and it does not stop a running task:
+
+```text
+┌────────────────────────────────────────────┐
+│                                            │
+│                                            │
+│                       [ Hide to menu bar ] │
+└────────────────────────────────────────────┘
+```
+
+Quitting stays an explicit action from the tray menu.
+
+## Layout
+
+The window is a two-column arrangement of the screens that already exist.
+
+```text
+┌──────────────┬───────────────────────────────────────────┐
+│  my-app   ⌄  │  Invoice PDF Downloads                    │
+│              │                                           │
+│  ▸ Today  5  │  Existing                                 │
+│    Goal      │  ✓ Invoice model in src/models/invoice.ts │
+│    Changes 4 │  ✓ Invoice detail page                    │
+│    Settings  │                                           │
+│              │  Missing                                  │
+│  ──────────  │  □ PDF generation   □ Download endpoint   │
+│  ⚡ 24:31    │                                           │
+│  ✦ Coding…   │  5 TASKS                                  │
+│              │  1. Create invoice PDF service  Backend   │
+│              │  2. Add download endpoint  after #1       │
+│              │                                           │
+│              │  [ Discard ]            [ Add 5 tasks ]   │
+└──────────────┴───────────────────────────────────────────┘
+```
+
+- **Left** — the project switcher, the five screens, and the current state of
+  the timer and the agent. This is the popup's information, always visible.
+- **Right** — the selected screen at full width.
+
+Minimum size roughly 720 × 520. Nothing about the layout may hide an approval
+request: a blocked agent is surfaced in the sidebar and in the menu bar.
+
+## What changes at window size
+
+| Screen | In the popup | In the window |
+| --- | --- | --- |
+| Today | One task list | Task list with description and criteria inline |
+| Goal | Short goal field | Multi-line goal field; whole plan visible at once |
+| Task | Scrolling column | Criteria, details and activity side by side |
+| Changes | File list, one diff | File list beside its diff |
+| Settings | Stacked sections | Same sections, two columns |
+
+## Dock behaviour
+
+The application runs as a menu-bar accessory and has no dock icon. While the
+desktop window is open it must behave like a normal application — appear in the
+dock and the application switcher, and accept keyboard focus — and return to
+being an accessory when the window closes.
+
+## State
+
+The window's size, position and whether it was open are remembered, and
+restored on launch. Both surfaces read the same state: a task started in the
+window shows as running in the popup, without a refresh.

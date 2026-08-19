@@ -23,8 +23,38 @@ pub struct Notification {
     pub params: Value,
 }
 
+/// Synthesised when the server asks permission, so a run loop can react to it
+/// exactly like any other event.
+pub const APPROVAL_REQUESTED: &str = "blitzit/approvalRequested";
+
+/// A permission request waiting on a human.
+#[derive(Clone, Debug)]
+pub struct PendingApproval {
+    /// The JSON-RPC id the answer must carry.
+    pub id: i64,
+    pub method: String,
+    pub thread_id: String,
+    pub command: Option<String>,
+    pub reason: Option<String>,
+    pub cwd: Option<String>,
+}
+
+/// Methods the server uses to ask permission before doing something.
+const APPROVAL_METHODS: &[&str] = &[
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    "execCommandApproval",
+    "applyPatchApproval",
+];
+
+fn is_approval(method: &str) -> bool {
+    APPROVAL_METHODS.contains(&method)
+}
+
 type Pending = Arc<Mutex<HashMap<i64, Sender<std::result::Result<Value, String>>>>>;
 type Subscribers = Arc<Mutex<Vec<Sender<Notification>>>>;
+type Approvals = Arc<Mutex<Vec<PendingApproval>>>;
 
 struct Session {
     child: Child,
@@ -37,6 +67,7 @@ pub struct CodexClient {
     session: Mutex<Option<Session>>,
     pending: Pending,
     subscribers: Subscribers,
+    approvals: Approvals,
 }
 
 fn write_message(stdin: &Arc<Mutex<ChildStdin>>, message: &Value) -> Result<()> {
@@ -102,7 +133,13 @@ impl CodexClient {
                 .ok_or_else(|| Error::invalid("codex app-server accepted no stdin"))?,
         ));
 
-        spawn_reader(stdout, self.pending.clone(), self.subscribers.clone(), stdin.clone());
+        spawn_reader(
+            stdout,
+            self.pending.clone(),
+            self.subscribers.clone(),
+            self.approvals.clone(),
+            stdin.clone(),
+        );
 
         *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(Session {
             child,
@@ -188,6 +225,54 @@ impl CodexClient {
         }
     }
 
+    /// Permission requests the server is still waiting on.
+    pub fn pending_approvals(&self) -> Vec<PendingApproval> {
+        self.approvals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    fn take_approval(&self, id: i64) -> Option<PendingApproval> {
+        let mut approvals = self.approvals.lock().unwrap_or_else(|e| e.into_inner());
+        let index = approvals.iter().position(|approval| approval.id == id)?;
+        Some(approvals.remove(index))
+    }
+
+    /// Answers one request. `decision` is a protocol value such as `accept`.
+    pub fn answer_approval(&self, id: i64, decision: &str) -> Result<()> {
+        let approval = self
+            .take_approval(id)
+            .ok_or_else(|| Error::invalid("that request is no longer waiting"))?;
+        let stdin = {
+            let guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+            let session = guard
+                .as_ref()
+                .ok_or_else(|| Error::invalid("codex app-server is not running"))?;
+            session.stdin.clone()
+        };
+        let _ = approval;
+        write_message(
+            &stdin,
+            &json!({ "jsonrpc": "2.0", "id": id, "result": { "decision": decision } }),
+        )
+    }
+
+    /// Refuses everything still waiting. Used when a run ends or is stopped, so
+    /// a request can never be left unanswered with the turn hanging on it.
+    pub fn decline_all_pending(&self) {
+        let waiting: Vec<i64> = self
+            .approvals
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|approval| approval.id)
+            .collect();
+        for id in waiting {
+            let _ = self.answer_approval(id, "decline");
+        }
+    }
+
     /// Stops the server. Safe to call when nothing is running.
     pub fn shutdown(&self) {
         let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
@@ -196,6 +281,10 @@ impl CodexClient {
             let _ = session.child.wait();
         }
         self.pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+        self.approvals
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clear();
@@ -214,6 +303,7 @@ fn spawn_reader(
     stdout: std::process::ChildStdout,
     pending: Pending,
     subscribers: Subscribers,
+    approvals: Approvals,
     stdin: Arc<Mutex<ChildStdin>>,
 ) {
     std::thread::spawn(move || {
@@ -247,8 +337,44 @@ fn spawn_reader(
                 }
                 // A request from the server, which must be answered.
                 (Some(id), Some(method)) => {
-                    let response = answer_server_request(id, method);
-                    let _ = write_message(&stdin, &response);
+                    if is_approval(method) {
+                        // Park it for a human and let the run loop know. Every
+                        // path that ends a run declines whatever is still here.
+                        let params = message.get("params").cloned().unwrap_or(Value::Null);
+                        let approval = PendingApproval {
+                            id,
+                            method: method.to_string(),
+                            thread_id: params
+                                .get("threadId")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default()
+                                .to_string(),
+                            command: params
+                                .get("command")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            reason: params
+                                .get("reason")
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
+                            cwd: params.get("cwd").and_then(Value::as_str).map(str::to_string),
+                        };
+                        approvals
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(approval);
+                        let notification = Notification {
+                            method: APPROVAL_REQUESTED.to_string(),
+                            params: json!({ "id": id, "threadId": params.get("threadId") }),
+                        };
+                        subscribers
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .retain(|sender| sender.send(notification.clone()).is_ok());
+                    } else {
+                        let response = answer_server_request(id, method);
+                        let _ = write_message(&stdin, &response);
+                    }
                 }
                 // A plain notification.
                 (None, Some(method)) => {
@@ -273,24 +399,14 @@ fn spawn_reader(
     });
 }
 
-/// Blitzit never silently grants Codex more access than the turn was started
-/// with, so approval requests are declined until a phase implements the UI.
+/// Anything the client cannot answer gets an explicit error rather than
+/// silence, so the turn never stalls waiting on us.
 fn answer_server_request(id: i64, method: &str) -> Value {
-    match method {
-        "item/commandExecution/requestApproval"
-        | "item/fileChange/requestApproval"
-        | "execCommandApproval"
-        | "applyPatchApproval" => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": { "decision": "decline" },
-        }),
-        _ => json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": { "code": -32601, "message": format!("blitzit does not handle {method}") },
-        }),
-    }
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": -32601, "message": format!("blitzit does not handle {method}") },
+    })
 }
 
 #[cfg(test)]
@@ -298,10 +414,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn approval_requests_are_declined_not_ignored() {
-        let response = answer_server_request(7, "item/fileChange/requestApproval");
-        assert_eq!(response["id"], 7);
-        assert_eq!(response["result"]["decision"], "decline");
+    fn approval_methods_are_routed_to_a_human_not_answered_inline() {
+        for method in APPROVAL_METHODS {
+            assert!(is_approval(method), "{method} should be routed");
+        }
+        assert!(!is_approval("item/tool/call"));
+    }
+
+    #[test]
+    fn declining_an_unknown_request_is_not_mistaken_for_approval() {
+        let client = CodexClient::default();
+        // Nothing is waiting, so an answer must fail rather than invent one.
+        assert!(client.answer_approval(1, "accept").is_err());
+        client.decline_all_pending();
+        assert!(client.pending_approvals().is_empty());
     }
 
     #[test]

@@ -14,6 +14,8 @@ use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const ANALYSIS_TIMEOUT: Duration = Duration::from_secs(10 * 60);
@@ -62,17 +64,17 @@ fn label_for_tool(name: &str, input: &Value) -> String {
     }
 }
 
-/// Pulls the plan out of a finished run, preferring the schema-validated object.
-fn plan_from_result(result: &Value) -> Result<plan::Plan> {
+/// The agent's final answer, preferring a schema-validated object when the run
+/// produced one.
+fn answer_text(result: &Value) -> Result<String> {
     if let Some(structured) = result.get("structured_output").filter(|v| !v.is_null()) {
-        return plan::plan_from_value(structured);
+        return Ok(structured.to_string());
     }
-    // No structured output: the model answered in prose, which may still be JSON.
-    let text = result
+    result
         .get("result")
         .and_then(Value::as_str)
-        .ok_or_else(|| Error::invalid("Claude Code finished without returning a plan."))?;
-    plan::parse_plan(text)
+        .map(str::to_string)
+        .ok_or_else(|| Error::invalid("Claude Code finished without answering."))
 }
 
 fn describe_failure(result: &Value) -> String {
@@ -102,9 +104,36 @@ pub fn run_analysis(
     project_path: &str,
     goal: &str,
     model: Option<&str>,
-    mut on_event: impl FnMut(AnalysisEvent),
-    is_cancelled: impl Fn() -> bool,
+    on_event: impl FnMut(AnalysisEvent),
+    cancelled: Arc<AtomicBool>,
 ) -> Result<AnalysisOutcome> {
+    let (text, session) = run_read_only(
+        binary,
+        project_path,
+        &format!("{}{}", plan::prompt(goal), plan::json_instruction()),
+        model,
+        on_event,
+        cancelled,
+        "Claude Code took too long to analyse this project. \
+         Try a more specific goal, or a faster model in Settings.",
+    )?;
+    Ok(AnalysisOutcome {
+        plan: plan::parse_plan(&text)?,
+        thread_id: session,
+    })
+}
+
+/// One read-only run, returning the agent's final answer and its session id.
+/// Shared by planning and verification.
+pub fn run_read_only(
+    binary: &Path,
+    project_path: &str,
+    prompt: &str,
+    model: Option<&str>,
+    mut on_event: impl FnMut(AnalysisEvent),
+    cancelled: Arc<AtomicBool>,
+    timeout_message: &str,
+) -> Result<(String, String)> {
     let mut command = Command::new(binary);
     command
         .current_dir(project_path)
@@ -113,7 +142,7 @@ pub fn run_analysis(
         // The schema is enforced by a tool call, and when a payload trips its
         // input limit the model retries with fewer fields — which then fails
         // the schema's own `required` list, and it never converges.
-        .arg(format!("{}{}", plan::prompt(goal), plan::json_instruction()))
+        .arg(prompt)
         .args(["--output-format", "stream-json", "--verbose"])
         .args(["--permission-mode", "plan"])
         .args(["--max-turns", MAX_TURNS])
@@ -128,29 +157,34 @@ pub fn run_analysis(
         command.args(["--model", model]);
     }
 
-    let mut child = command.spawn().map_err(|error| {
-        Error::invalid(format!("could not start Claude Code: {error}"))
-    })?;
+    let mut child = command
+        .spawn()
+        .map_err(|error| Error::invalid(format!("could not start Claude Code: {error}")))?;
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| Error::invalid("Claude Code produced no output"))?;
+    let child = Arc::new(Mutex::new(child));
+    let finished = crate::run::spawn_canceller(child.clone(), cancelled.clone());
 
     let deadline = Instant::now() + ANALYSIS_TIMEOUT;
     let mut session_id = String::new();
-    let mut outcome: Option<Result<AnalysisOutcome>> = None;
+    let mut outcome: Option<Result<(String, String)>> = None;
 
     for line in BufReader::new(stdout).lines() {
-        if is_cancelled() {
+        if cancelled.load(Ordering::SeqCst) {
+            finished.store(true, Ordering::SeqCst);
+            let mut child = child.lock().unwrap_or_else(|e| e.into_inner());
             let _ = child.kill();
+            let _ = child.wait();
             return Err(Error::invalid("Analysis cancelled."));
         }
         if Instant::now() >= deadline {
+            finished.store(true, Ordering::SeqCst);
+            let mut child = child.lock().unwrap_or_else(|e| e.into_inner());
             let _ = child.kill();
-            return Err(Error::invalid(
-                "Claude Code took too long to analyse this project. \
-                 Try a more specific goal, or a faster model in Settings.",
-            ));
+            let _ = child.wait();
+            return Err(Error::invalid(timeout_message));
         }
 
         let Ok(line) = line else { break };
@@ -213,10 +247,7 @@ pub fn run_analysis(
                 outcome = Some(if failed {
                     Err(Error::invalid(describe_failure(&message)))
                 } else {
-                    plan_from_result(&message).map(|plan| AnalysisOutcome {
-                        plan,
-                        thread_id: session_id.clone(),
-                    })
+                    answer_text(&message).map(|text| (text, session_id.clone()))
                 });
                 // The result is the last thing worth reading. Waiting for the
                 // stream to close can hang: the CLI starts helper processes
@@ -228,8 +259,12 @@ pub fn run_analysis(
         }
     }
 
-    let _ = child.kill();
-    let status = child.wait();
+    finished.store(true, Ordering::SeqCst);
+    let status = {
+        let mut child = child.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = child.kill();
+        child.wait()
+    };
     match outcome {
         Some(outcome) => outcome,
         None => {
@@ -273,27 +308,18 @@ mod tests {
     #[test]
     fn the_schema_validated_object_is_preferred_over_the_prose() {
         let result = json!({
-            "structured_output": {
-                "summary": "s", "existing": [], "missing": [],
-                "tasks": [{
-                    "title": "Do the thing", "description": "", "category": "backend",
-                    "acceptanceCriteria": [], "relevantFiles": [], "dependsOn": [],
-                    "estimateMinutes": 30
-                }]
-            },
-            "result": "some prose that is not a plan"
+            "structured_output": { "summary": "s" },
+            "result": "some prose that is not the answer"
         });
-        let plan = plan_from_result(&result).unwrap();
-        assert_eq!(plan.tasks[0].title, "Do the thing");
+        let text = answer_text(&result).unwrap();
+        assert!(text.contains("\"summary\""));
+        assert!(!text.contains("prose"));
     }
 
     #[test]
-    fn prose_json_is_used_when_no_structured_output_came_back() {
-        let result = json!({
-            "structured_output": Value::Null,
-            "result": r#"{"summary":"s","existing":[],"missing":[],"tasks":[{"title":"Fallback","description":"","category":"backend","acceptanceCriteria":[],"relevantFiles":[],"dependsOn":[],"estimateMinutes":10}]}"#
-        });
-        assert_eq!(plan_from_result(&result).unwrap().tasks[0].title, "Fallback");
+    fn prose_is_used_when_no_structured_output_came_back() {
+        let result = json!({ "structured_output": Value::Null, "result": "the answer" });
+        assert_eq!(answer_text(&result).unwrap(), "the answer");
     }
 
     #[test]

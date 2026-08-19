@@ -3,7 +3,7 @@ import { computed, ref, watch } from "vue";
 import AppIcon from "../components/AppIcon.vue";
 import PanelHeader from "../components/PanelHeader.vue";
 import SelectMenu from "../components/SelectMenu.vue";
-import { formatClock } from "../lib/format";
+import { formatClock, formatSpan } from "../lib/format";
 import { useAppStore } from "../stores/app";
 import { useFocusStore } from "../stores/focus";
 import { useTasksStore } from "../stores/tasks";
@@ -22,6 +22,7 @@ const task = computed(() =>
   app.selectedTaskId === null ? undefined : tasks.byId.get(app.selectedTaskId),
 );
 
+const taskOrNull = computed(() => task.value ?? null);
 const isFocused = computed(() => !!task.value && focus.isFocused(task.value.id));
 const blockers = computed(() => (task.value ? tasks.blockedBy(task.value) : []));
 const finishedHere = computed(
@@ -32,6 +33,14 @@ const finishedHere = computed(
 const clock = computed(() => {
   if (isFocused.value) return formatClock(focus.snapshot.remainingSeconds);
   return formatClock(app.settings.focusMinutes * 60);
+});
+
+/** How much has already gone into this task, across every session. */
+const spent = computed(() => {
+  const task = taskOrNull.value;
+  if (!task || task.focusSessions === 0) return null;
+  const sessions = `${task.focusSessions} session${task.focusSessions === 1 ? "" : "s"}`;
+  return `${sessions} · ${formatSpan(task.focusSeconds)} on this task`;
 });
 
 const sessionNote = computed(() => {
@@ -114,7 +123,7 @@ async function destroy() {
       </template>
     </PanelHeader>
 
-    <div class="max-h-[380px] overflow-y-auto px-3.5 pb-3">
+    <div class="panel-scroll px-3.5 pb-3">
       <!-- Timer -->
       <div class="card px-3 py-3">
         <div class="flex items-center gap-3">
@@ -123,6 +132,7 @@ async function destroy() {
               {{ clock }}
             </p>
             <p class="mt-1.5 truncate text-[11px] text-ink-2">{{ sessionNote }}</p>
+            <p v-if="spent" class="mt-0.5 truncate text-[11px] text-ink-3">{{ spent }}</p>
           </div>
           <button
             v-if="!isFocused"
@@ -214,7 +224,7 @@ async function destroy() {
         <h2 class="eyebrow">Details</h2>
         <textarea
           :value="task.description ?? ''"
-          rows="2"
+          rows="8"
           placeholder="What needs to change?"
           class="field mt-1.5 w-full resize-none px-2.5 py-2 text-[12.5px] leading-snug"
           @change="tasks.update(task.id, { description: ($event.target as HTMLTextAreaElement).value })"
@@ -249,22 +259,6 @@ async function destroy() {
         </ul>
       </section>
 
-      <!-- Codex slot, wired in a later phase -->
-      <section class="card mt-4 border-accent/25 bg-accent-soft/50 px-3 py-2.5">
-        <div class="flex items-center justify-between gap-2">
-          <span class="flex items-center gap-1.5 text-[12px] font-semibold text-accent">
-            <AppIcon name="sparkle" :size="12" filled />Codex
-          </span>
-          <span class="text-[11px] text-ink-2">Not started</span>
-        </div>
-        <button
-          class="btn btn-ghost mt-2 w-full cursor-not-allowed py-1.5"
-          disabled
-          title="Codex execution arrives in a later phase"
-        >
-          Run with Codex
-        </button>
-      </section>
     </div>
 
     <footer class="flex items-center gap-2 border-t border-line px-3.5 py-2.5">

@@ -134,8 +134,14 @@ const ADD_GOAL_AGENT: &str = r#"
 ALTER TABLE goals ADD COLUMN agent TEXT NOT NULL DEFAULT 'codex';
 "#;
 
+/// A task's conversation belongs to the agent that started it; resuming a
+/// Claude session through Codex would be meaningless.
+const ADD_THREAD_AGENT: &str = r#"
+ALTER TABLE codex_threads ADD COLUMN agent TEXT NOT NULL DEFAULT 'codex';
+"#;
+
 /// Migrations are applied in order; `user_version` records how many have run.
-const MIGRATIONS: &[&str] = &[SCHEMA, ADD_GOAL_PLANNING, ADD_GOAL_AGENT];
+const MIGRATIONS: &[&str] = &[SCHEMA, ADD_GOAL_PLANNING, ADD_GOAL_AGENT, ADD_THREAD_AGENT];
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
@@ -250,16 +256,19 @@ fn dependencies_for(conn: &Connection, task_id: i64) -> Result<Vec<i64>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn focus_seconds_for(conn: &Connection, task_id: i64) -> Result<i64> {
+/// Time spent and sessions taken, in one pass over the task's sessions.
+fn focus_summary_for(conn: &Connection, task_id: i64) -> Result<(i64, i64)> {
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(elapsed_seconds), 0) FROM focus_sessions WHERE task_id = ?1",
+        "SELECT COALESCE(SUM(elapsed_seconds), 0), COUNT(*)
+         FROM focus_sessions WHERE task_id = ?1",
         [task_id],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )?)
 }
 
 fn task_from_row(conn: &Connection, row: &Row) -> Result<Task> {
     let id: i64 = row.get("id")?;
+    let summary = focus_summary_for(conn, id)?;
     Ok(Task {
         id,
         project_id: row.get("project_id")?,
@@ -277,7 +286,8 @@ fn task_from_row(conn: &Connection, row: &Row) -> Result<Task> {
         criteria: criteria_for(conn, id)?,
         files: files_for(conn, id)?,
         depends_on: dependencies_for(conn, id)?,
-        focus_seconds: focus_seconds_for(conn, id)?,
+        focus_seconds: summary.0,
+        focus_sessions: summary.1,
     })
 }
 
@@ -479,6 +489,57 @@ pub fn set_criterion_met(conn: &Connection, id: i64, is_met: bool) -> Result<i64
         params![id, is_met as i64],
     )?;
     Ok(task_id)
+}
+
+// ----------------------------------------------------------- agent threads
+
+/// Records the conversation an agent used for a task, so a later run can pick
+/// up where the last one stopped instead of starting from nothing.
+pub fn save_task_thread(
+    conn: &Connection,
+    task_id: i64,
+    agent: crate::agent::Agent,
+    thread_id: &str,
+    status: &str,
+) -> Result<()> {
+    let ts = now();
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM codex_threads WHERE task_id = ?1 AND agent = ?2",
+            params![task_id, agent],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match existing {
+        Some(id) => conn.execute(
+            "UPDATE codex_threads
+             SET codex_thread_id = ?2, status = ?3, last_activity_at = ?4
+             WHERE id = ?1",
+            params![id, thread_id, status, ts],
+        )?,
+        None => conn.execute(
+            "INSERT INTO codex_threads
+               (task_id, agent, codex_thread_id, status, started_at, last_activity_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![task_id, agent, thread_id, status, ts],
+        )?,
+    };
+    Ok(())
+}
+
+/// The conversation this agent last used for the task, if there is one.
+pub fn task_thread(
+    conn: &Connection,
+    task_id: i64,
+    agent: crate::agent::Agent,
+) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT codex_thread_id FROM codex_threads WHERE task_id = ?1 AND agent = ?2",
+            params![task_id, agent],
+            |row| row.get(0),
+        )
+        .optional()?)
 }
 
 // ----------------------------------------------------------- focus sessions
@@ -706,6 +767,114 @@ pub fn create_tasks_from_plan(conn: &Connection, goal: &Goal) -> Result<Vec<Task
     list_tasks(conn, goal.project_id)
 }
 
+// ----------------------------------------------------------- verifications
+
+/// Keeps the verdict so a task's last review survives a restart.
+pub fn save_verification(
+    conn: &Connection,
+    task_id: i64,
+    result: &crate::verify::Verification,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO task_verifications
+           (task_id, created_at, satisfied_count, total_count, summary, raw_result)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            task_id,
+            now(),
+            result.satisfied() as i64,
+            result.total() as i64,
+            result.summary,
+            serde_json::to_string(result)?,
+        ],
+    )?;
+    Ok(())
+}
+
+// ------------------------------------------------------------------ stats
+
+/// A small read on how the work is actually going.
+#[derive(serde::Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Stats {
+    /// Focus recorded since local midnight.
+    pub focus_today_seconds: i64,
+    pub tasks_done_week: i64,
+    pub sessions_week: i64,
+    /// Mean length of a finished session over the same week.
+    pub average_session_seconds: i64,
+}
+
+pub fn stats(conn: &Connection) -> Result<Stats> {
+    // The boundaries are computed by SQLite so "today" means the developer's
+    // today, not UTC's.
+    let single = |sql: &str| -> Result<i64> {
+        Ok(conn.query_row(sql, [], |row| row.get::<_, Option<i64>>(0))?.unwrap_or(0))
+    };
+
+    Ok(Stats {
+        focus_today_seconds: single(
+            "SELECT COALESCE(SUM(elapsed_seconds), 0) FROM focus_sessions
+             WHERE started_at >= CAST(strftime('%s', 'now', 'start of day', 'localtime') AS INTEGER)",
+        )?,
+        tasks_done_week: single(
+            "SELECT COUNT(*) FROM tasks
+             WHERE completed_at IS NOT NULL
+               AND completed_at >= CAST(strftime('%s', 'now', '-7 days') AS INTEGER)",
+        )?,
+        sessions_week: single(
+            "SELECT COUNT(*) FROM focus_sessions
+             WHERE started_at >= CAST(strftime('%s', 'now', '-7 days') AS INTEGER)",
+        )?,
+        average_session_seconds: single(
+            "SELECT CAST(COALESCE(AVG(elapsed_seconds), 0) AS INTEGER) FROM focus_sessions
+             WHERE ended_at IS NOT NULL
+               AND started_at >= CAST(strftime('%s', 'now', '-7 days') AS INTEGER)",
+        )?,
+    })
+}
+
+// ------------------------------------------------------------ window state
+
+/// The desktop window's geometry, kept out of `Settings` because it is
+/// bookkeeping rather than a preference the developer sets.
+pub fn window_state(conn: &Connection) -> Result<crate::desktop::WindowState> {
+    let number = |key: &str, fallback: f64| -> f64 {
+        read_setting(conn, key)
+            .ok()
+            .flatten()
+            .and_then(|raw| raw.parse::<f64>().ok())
+            .unwrap_or(fallback)
+    };
+    let position = match (
+        read_setting(conn, "window_x")?.and_then(|raw| raw.parse::<f64>().ok()),
+        read_setting(conn, "window_y")?.and_then(|raw| raw.parse::<f64>().ok()),
+    ) {
+        (Some(x), Some(y)) => Some((x, y)),
+        _ => None,
+    };
+    Ok(crate::desktop::WindowState {
+        open: read_setting(conn, "window_open")?.as_deref() == Some("1"),
+        width: number("window_w", 940.0),
+        height: number("window_h", 640.0),
+        position,
+    })
+}
+
+pub fn save_window_state(
+    conn: &Connection,
+    state: &crate::desktop::WindowState,
+) -> Result<()> {
+    write_setting(conn, "window_open", if state.open { "1" } else { "0" })?;
+    write_setting(conn, "window_w", &state.width.round().to_string())?;
+    write_setting(conn, "window_h", &state.height.round().to_string())?;
+    if let Some((x, y)) = state.position {
+        write_setting(conn, "window_x", &x.round().to_string())?;
+        write_setting(conn, "window_y", &y.round().to_string())?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------- settings
 
 fn read_setting(conn: &Connection, key: &str) -> Result<Option<String>> {
@@ -742,6 +911,18 @@ pub fn get_settings(conn: &Connection) -> Result<Settings> {
     if let Some(raw) = read_setting(conn, "agent")? {
         settings.agent = crate::agent::Agent::parse_lenient(&raw);
     }
+    if let Some(raw) = read_setting(conn, "theme")? {
+        settings.theme = Theme::parse_lenient(&raw);
+    }
+    if let Some(raw) = read_setting(conn, "notifications")? {
+        settings.notifications = raw == "1";
+    }
+    if let Some(raw) = read_setting(conn, "launch_at_login")? {
+        settings.launch_at_login = raw == "1";
+    }
+    if let Some(raw) = read_setting(conn, "onboarded")? {
+        settings.onboarded = raw == "1";
+    }
     settings.codex_path = read_setting(conn, "codex_path")?.filter(|v| !v.trim().is_empty());
     settings.claude_path = read_setting(conn, "claude_path")?.filter(|v| !v.trim().is_empty());
     settings.claude_model = read_setting(conn, "claude_model")?.filter(|v| !v.trim().is_empty());
@@ -768,6 +949,18 @@ pub fn update_settings(conn: &Connection, patch: &SettingsPatch) -> Result<Setti
     }
     if let Some(agent) = patch.agent {
         write_setting(conn, "agent", agent.as_str())?;
+    }
+    if let Some(theme) = patch.theme {
+        write_setting(conn, "theme", theme.as_str())?;
+    }
+    if let Some(on) = patch.notifications {
+        write_setting(conn, "notifications", if on { "1" } else { "0" })?;
+    }
+    if let Some(on) = patch.launch_at_login {
+        write_setting(conn, "launch_at_login", if on { "1" } else { "0" })?;
+    }
+    if let Some(on) = patch.onboarded {
+        write_setting(conn, "onboarded", if on { "1" } else { "0" })?;
     }
     for (key, value) in [
         ("codex_path", &patch.codex_path),
@@ -1065,7 +1258,43 @@ mod tests {
     }
 
     #[test]
-    fn focus_time_accumulates_across_sessions() {
+    fn a_task_thread_is_kept_per_agent_and_updated_in_place() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = a_task(&conn, project.id, "PDF service");
+
+        save_task_thread(&conn, task.id, crate::agent::Agent::Codex, "codex-1", "running").unwrap();
+        save_task_thread(&conn, task.id, crate::agent::Agent::Codex, "codex-1", "finished").unwrap();
+        save_task_thread(&conn, task.id, crate::agent::Agent::ClaudeCode, "claude-1", "running")
+            .unwrap();
+
+        assert_eq!(
+            task_thread(&conn, task.id, crate::agent::Agent::Codex).unwrap(),
+            Some("codex-1".to_string())
+        );
+        assert_eq!(
+            task_thread(&conn, task.id, crate::agent::Agent::ClaudeCode).unwrap(),
+            Some("claude-1".to_string())
+        );
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM codex_threads", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 2, "one row per agent, updated rather than appended");
+    }
+
+    #[test]
+    fn a_task_with_no_run_yet_has_no_thread() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = a_task(&conn, project.id, "PDF service");
+        assert_eq!(
+            task_thread(&conn, task.id, crate::agent::Agent::Codex).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn focus_time_and_session_count_accumulate_together() {
         let conn = memory_db();
         let project = a_project(&conn);
         let task = a_task(&conn, project.id, "deep work");
@@ -1075,7 +1304,74 @@ mod tests {
         let second = open_focus_session(&conn, task.id, 1500).unwrap();
         close_focus_session(&conn, second, 600, true).unwrap();
 
-        assert_eq!(get_task(&conn, task.id).unwrap().focus_seconds, 1500);
+        let task = get_task(&conn, task.id).unwrap();
+        assert_eq!(task.focus_seconds, 1500);
+        assert_eq!(task.focus_sessions, 2);
+    }
+
+    #[test]
+    fn a_task_never_focused_reports_no_sessions() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = a_task(&conn, project.id, "untouched");
+        let task = get_task(&conn, task.id).unwrap();
+        assert_eq!((task.focus_seconds, task.focus_sessions), (0, 0));
+    }
+
+    #[test]
+    fn stats_are_zero_on_a_fresh_database() {
+        let conn = memory_db();
+        let stats = stats(&conn).unwrap();
+        assert_eq!(stats.focus_today_seconds, 0);
+        assert_eq!(stats.tasks_done_week, 0);
+        assert_eq!(stats.sessions_week, 0);
+        assert_eq!(stats.average_session_seconds, 0);
+    }
+
+    #[test]
+    fn stats_count_todays_focus_and_this_weeks_work() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = a_task(&conn, project.id, "deep work");
+
+        let first = open_focus_session(&conn, task.id, 1500).unwrap();
+        close_focus_session(&conn, first, 600, true).unwrap();
+        let second = open_focus_session(&conn, task.id, 1500).unwrap();
+        close_focus_session(&conn, second, 1200, true).unwrap();
+        update_task(
+            &conn,
+            task.id,
+            &TaskPatch {
+                status: Some(TaskStatus::Completed),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let stats = stats(&conn).unwrap();
+        assert_eq!(stats.focus_today_seconds, 1800, "both sessions were today");
+        assert_eq!(stats.sessions_week, 2);
+        assert_eq!(stats.tasks_done_week, 1);
+        assert_eq!(stats.average_session_seconds, 900);
+    }
+
+    #[test]
+    fn work_older_than_the_window_is_left_out() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = a_task(&conn, project.id, "old work");
+        let old = open_focus_session(&conn, task.id, 1500).unwrap();
+        close_focus_session(&conn, old, 600, true).unwrap();
+        // Backdate it well past the week.
+        conn.execute(
+            "UPDATE focus_sessions SET started_at = started_at - (30 * 86400) WHERE id = ?1",
+            [old],
+        )
+        .unwrap();
+
+        let stats = stats(&conn).unwrap();
+        assert_eq!(stats.sessions_week, 0);
+        assert_eq!(stats.focus_today_seconds, 0);
     }
 
     #[test]
@@ -1099,6 +1395,54 @@ mod tests {
             .unwrap();
         assert_eq!(still_open, 1);
         assert_ne!(open.0, stale);
+    }
+
+    #[test]
+    fn window_state_round_trips_and_defaults_to_closed() {
+        let conn = memory_db();
+        let fresh = window_state(&conn).unwrap();
+        assert!(!fresh.open);
+        assert_eq!((fresh.width, fresh.height), (940.0, 640.0));
+        assert_eq!(fresh.position, None);
+
+        save_window_state(
+            &conn,
+            &crate::desktop::WindowState {
+                open: true,
+                width: 1200.0,
+                height: 800.0,
+                position: Some((40.0, 60.0)),
+            },
+        )
+        .unwrap();
+
+        let saved = window_state(&conn).unwrap();
+        assert!(saved.open);
+        assert_eq!((saved.width, saved.height), (1200.0, 800.0));
+        assert_eq!(saved.position, Some((40.0, 60.0)));
+    }
+
+    #[test]
+    fn the_theme_round_trips_and_defaults_to_light() {
+        let conn = memory_db();
+        assert_eq!(get_settings(&conn).unwrap().theme, Theme::Light);
+        let saved = update_settings(
+            &conn,
+            &SettingsPatch {
+                theme: Some(Theme::GithubDark),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(saved.theme, Theme::GithubDark);
+        assert_eq!(get_settings(&conn).unwrap().theme, Theme::GithubDark);
+    }
+
+    #[test]
+    fn an_unknown_stored_theme_falls_back_rather_than_failing() {
+        let conn = memory_db();
+        write_setting(&conn, "theme", "solarized-neon").unwrap();
+        assert_eq!(get_settings(&conn).unwrap().theme, Theme::Light);
     }
 
     #[test]

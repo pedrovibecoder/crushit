@@ -46,7 +46,7 @@ async function useCandidate() {
       @back="app.back()"
     />
 
-    <div class="max-h-[380px] overflow-y-auto px-3.5 pb-3.5">
+    <div class="panel-scroll px-3.5 pb-3.5">
       <!-- Confirmation step for a freshly picked directory -->
       <div v-if="candidate" class="card px-3 py-3">
         <div class="flex items-start gap-2.5">

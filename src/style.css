@@ -24,6 +24,68 @@
   --color-warn-soft: #fdf2df;
   --color-danger: #d95757;
   --color-danger-soft: #fdecec;
+
+  /* The strong fill used by primary buttons and selected pills, and what
+     reads on top of it. Named separately from `ink` because a dark theme
+     inverts the text but not the fill. */
+  --color-solid: #14140f;
+  --color-on-solid: #ffffff;
+
+  /* Progress runs warm to cool as it completes. */
+  --color-progress-from: #f2c744;
+  --color-progress-to: #7ed957;
+
+  /* One dot colour per task category. */
+  --color-cat-frontend: #4a9bf5;
+  --color-cat-backend: #7b61ff;
+  --color-cat-database: #3fbf6a;
+  --color-cat-security: #e05656;
+  --color-cat-testing: #e2a32c;
+  --color-cat-devops: #20b1c4;
+  --color-cat-refactor: #8a8f9a;
+  --color-cat-bug: #e0609b;
+}
+
+/*
+ * GitHub Dark Default. Only the palette changes: every utility in the app
+ * resolves through these variables, so the layout and type scale are shared.
+ */
+:root[data-theme="github-dark"] {
+  --color-page: #0d1117;
+  --color-card: #161b22;
+
+  --color-line: #30363d;
+  --color-line-soft: #21262d;
+
+  --color-ink: #e6edf3;
+  --color-ink-2: #8b949e;
+  --color-ink-3: #6e7681;
+
+  --color-accent: #58a6ff;
+  --color-accent-soft: #18273a;
+  --color-success: #3fb950;
+  --color-success-soft: #152a20;
+  --color-warn: #d29922;
+  --color-warn-soft: #2b2519;
+  --color-danger: #f85149;
+  --color-danger-soft: #301b1f;
+
+  --color-solid: #1f6feb;
+  --color-on-solid: #ffffff;
+
+  --color-progress-from: #d29922;
+  --color-progress-to: #3fb950;
+
+  --color-cat-frontend: #58a6ff;
+  --color-cat-backend: #a371f7;
+  --color-cat-database: #3fb950;
+  --color-cat-security: #f85149;
+  --color-cat-testing: #d29922;
+  --color-cat-devops: #39c5cf;
+  --color-cat-refactor: #8b949e;
+  --color-cat-bug: #db61a2;
+
+  color-scheme: dark;
 }
 
 html,
@@ -106,11 +168,12 @@ textarea {
     color: var(--color-ink-3);
   }
   .btn-dark {
-    background: var(--color-ink);
-    color: #fff;
+    background: var(--color-solid);
+    color: var(--color-on-solid);
   }
   .btn-dark:hover:not(:disabled) {
-    background: #32322a;
+    /* A touch lighter than the fill, whichever direction the theme runs. */
+    background: color-mix(in oklab, var(--color-solid) 88%, var(--color-ink));
   }
   .btn-ghost {
     background: var(--color-card);
@@ -149,11 +212,60 @@ textarea {
     font-weight: 500;
   }
 
+  /* The scrolling body of a screen. Capped in the popup, uncapped in the
+     desktop window, which sets `--panel-max` to none and scrolls the column. */
+  .panel-scroll {
+    max-height: var(--panel-max, 380px);
+    overflow-y: auto;
+  }
+
   /* Tiny gray section label above a group. */
   .eyebrow {
     font-size: 11px;
     font-weight: 600;
     color: var(--color-ink-2);
+  }
+}
+
+/* Screen changes get a short cross-fade so the popup does not snap. */
+.screen-enter-active,
+.screen-leave-active {
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+.screen-enter-from {
+  opacity: 0;
+  transform: translateY(3px);
+}
+.screen-leave-to {
+  opacity: 0;
+  transform: translateY(-3px);
+}
+
+/* A task appearing or leaving the list is worth a beat; a reorder is not. */
+.row-enter-active,
+.row-leave-active {
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+}
+.row-enter-from,
+.row-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+.row-leave-active {
+  position: absolute;
+  width: calc(100% - 1.75rem);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen-enter-active,
+  .screen-leave-active,
+  .row-enter-active,
+  .row-leave-active {
+    transition: none;
   }
 }
 

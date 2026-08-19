@@ -11,7 +11,7 @@ const percent = computed(() =>
 <template>
   <div class="h-1.5 w-full overflow-hidden rounded-full bg-line-soft">
     <div
-      class="h-full rounded-full bg-linear-to-r from-[#f2c744] to-[#7ed957] transition-[width] duration-300"
+      class="h-full rounded-full bg-linear-to-r from-progress-from to-progress-to transition-[width] duration-300"
       :style="{ width: `${percent}%` }"
     />
   </div>

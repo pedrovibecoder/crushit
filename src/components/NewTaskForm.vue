@@ -60,7 +60,7 @@ defineExpose({ focus: () => input.value?.focus() });
         class="chip transition-colors"
         :class="
           category === value
-            ? 'border-ink bg-ink text-white'
+            ? 'border-solid bg-solid text-on-solid'
             : 'text-ink-2 hover:bg-line-soft'
         "
         :aria-pressed="category === value"

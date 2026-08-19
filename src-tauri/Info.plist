@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Blitzit lives in the menu bar, so it starts as an accessory: no dock
+      icon, no app-switcher entry. Opening the desktop window switches the
+      activation policy at runtime, which puts it in the dock while it is open.
+    -->
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>

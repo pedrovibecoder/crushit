@@ -132,6 +132,8 @@ pub struct Task {
     pub depends_on: Vec<i64>,
     /// Total seconds of focus recorded against this task.
     pub focus_seconds: i64,
+    /// How many focus sessions it has taken so far.
+    pub focus_sessions: i64,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -162,6 +164,12 @@ pub struct TaskPatch {
     pub files: Option<Vec<String>>,
     pub depends_on: Option<Vec<i64>>,
 }
+
+string_enum!(Theme {
+    Light => "light",
+    /// GitHub's Dark Default palette.
+    GithubDark => "github-dark",
+}, default = Light);
 
 string_enum!(GoalStatus {
     Draft => "draft",
@@ -213,6 +221,13 @@ pub struct Settings {
     pub codex_model: Option<String>,
     pub claude_path: Option<String>,
     pub claude_model: Option<String>,
+    /// Which palette the interface uses.
+    pub theme: Theme,
+    /// Announce the moments that happen while you are looking elsewhere.
+    pub notifications: bool,
+    pub launch_at_login: bool,
+    /// False until the first run has been walked through.
+    pub onboarded: bool,
 }
 
 impl Default for Settings {
@@ -227,6 +242,10 @@ impl Default for Settings {
             codex_model: None,
             claude_path: None,
             claude_model: None,
+            theme: Theme::Light,
+            notifications: true,
+            launch_at_login: false,
+            onboarded: false,
         }
     }
 }
@@ -243,4 +262,8 @@ pub struct SettingsPatch {
     pub codex_model: Option<Option<String>>,
     pub claude_path: Option<Option<String>>,
     pub claude_model: Option<Option<String>>,
+    pub theme: Option<Theme>,
+    pub notifications: Option<bool>,
+    pub launch_at_login: Option<bool>,
+    pub onboarded: Option<bool>,
 }

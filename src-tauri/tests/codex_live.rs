@@ -122,3 +122,35 @@ fn a_planning_turn_runs_end_to_end() {
         }
     }
 }
+
+#[test]
+#[ignore = "spawns the real codex app-server"]
+fn an_execution_thread_is_started_in_workspace_write() {
+    let Some((client, binary)) = client_or_skip() else {
+        panic!("no codex binary found");
+    };
+    client.ensure_started(&binary, "0.1.0-test").unwrap();
+
+    let response = client
+        .request(
+            "thread/start",
+            json!({
+                "cwd": env!("CARGO_MANIFEST_DIR"),
+                "sandbox": "workspace-write",
+                "approvalPolicy": "on-request",
+            }),
+            Duration::from_secs(60),
+        )
+        .expect("thread/start should succeed");
+
+    // Execution needs write access, and only inside the workspace.
+    assert_eq!(response["sandbox"]["type"], "workspaceWrite");
+    assert_eq!(
+        response["sandbox"]["networkAccess"], false,
+        "the workspace sandbox should not also open the network"
+    );
+    // Approvals must come to us rather than being auto-granted.
+    assert_eq!(response["approvalPolicy"], "on-request");
+
+    client.shutdown();
+}

@@ -64,6 +64,7 @@ export interface Task {
   files: string[];
   dependsOn: number[];
   focusSeconds: number;
+  focusSessions: number;
 }
 
 export interface NewTask {
@@ -107,6 +108,10 @@ export interface Settings {
   codexModel: string | null;
   claudePath: string | null;
   claudeModel: string | null;
+  theme: Theme;
+  notifications: boolean;
+  launchAtLogin: boolean;
+  onboarded: boolean;
 }
 
 export interface SettingsPatch {
@@ -119,6 +124,10 @@ export interface SettingsPatch {
   codexModel?: string | null;
   claudePath?: string | null;
   claudeModel?: string | null;
+  theme?: Theme;
+  notifications?: boolean;
+  launchAtLogin?: boolean;
+  onboarded?: boolean;
 }
 
 export type GoalStatus =
@@ -179,6 +188,89 @@ export interface AnalysisSnapshot {
   startedAt: number;
 }
 
+export type ExecutionStatus =
+  | "idle"
+  | "running"
+  | "awaiting-approval"
+  | "finished"
+  | "failed";
+
+export interface ActivityItem {
+  id: string;
+  label: string;
+  kind: string;
+  done: boolean;
+}
+
+export interface ApprovalRequest {
+  id: number;
+  title: string;
+  command: string | null;
+  reason: string | null;
+}
+
+export interface ExecutionSnapshot {
+  status: ExecutionStatus;
+  taskId: number | null;
+  taskTitle: string;
+  agent: Agent;
+  threadId: string | null;
+  activity: ActivityItem[];
+  changedFiles: string[];
+  approval: ApprovalRequest | null;
+  summary: string | null;
+  error: string | null;
+  startedAt: number;
+}
+
+export interface CriterionVerdict {
+  text: string;
+  satisfied: boolean;
+  evidence: string;
+}
+
+export interface Verification {
+  summary: string;
+  criteria: CriterionVerdict[];
+  complete: boolean;
+}
+
+export type VerificationStatus = "idle" | "running" | "ready" | "failed";
+
+export interface VerificationSnapshot {
+  status: VerificationStatus;
+  taskId: number | null;
+  taskTitle: string;
+  steps: AnalysisStep[];
+  result: Verification | null;
+  satisfied: number;
+  total: number;
+  recommendation: string;
+  error: string | null;
+  startedAt: number;
+}
+
+export interface ChangedFile {
+  path: string;
+  state: string;
+  insertions: number;
+  deletions: number;
+}
+
+export interface RepoChanges {
+  files: ChangedFile[];
+  insertions: number;
+  deletions: number;
+  isGit: boolean;
+}
+
+export interface Stats {
+  focusTodaySeconds: number;
+  tasksDoneWeek: number;
+  sessionsWeek: number;
+  averageSessionSeconds: number;
+}
+
 export interface ShortcutInfo {
   combo: string | null;
   problem: string | null;
@@ -218,6 +310,8 @@ export interface Bootstrap {
   focus: FocusSnapshot;
   analysis: AnalysisSnapshot;
   goal: Goal | null;
+  execution: ExecutionSnapshot;
+  verification: VerificationSnapshot;
 }
 
 export const TASK_CATEGORIES: TaskCategory[] = [
@@ -242,16 +336,28 @@ export const CATEGORY_LABELS: Record<TaskCategory, string> = {
   bug: "Bug",
 };
 
-/** A single dot of colour is enough to tell categories apart at small sizes. */
+/**
+ * A single dot of colour is enough to tell categories apart at small sizes.
+ * These resolve through CSS variables so the palette follows the theme.
+ */
 export const CATEGORY_DOTS: Record<TaskCategory, string> = {
-  frontend: "#4a9bf5",
-  backend: "#7b61ff",
-  database: "#3fbf6a",
-  security: "#e05656",
-  testing: "#e2a32c",
-  devops: "#20b1c4",
-  refactor: "#8a8f9a",
-  bug: "#e0609b",
+  frontend: "var(--color-cat-frontend)",
+  backend: "var(--color-cat-backend)",
+  database: "var(--color-cat-database)",
+  security: "var(--color-cat-security)",
+  testing: "var(--color-cat-testing)",
+  devops: "var(--color-cat-devops)",
+  refactor: "var(--color-cat-refactor)",
+  bug: "var(--color-cat-bug)",
+};
+
+export type Theme = "light" | "github-dark";
+
+export const THEMES: Theme[] = ["light", "github-dark"];
+
+export const THEME_LABELS: Record<Theme, string> = {
+  light: "Light",
+  "github-dark": "GitHub Dark",
 };
 
 export const STATUS_LABELS: Record<TaskStatus, string> = {

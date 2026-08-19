@@ -5,9 +5,12 @@
     <title>Blitzit preview</title>
     <style>
       body { background: #dfdedb; padding: 18px; width: 396px; }
+      /* The desktop surface fills the viewport instead of sitting in a card. */
+      body.desktop { padding: 0; width: auto; }
     </style>
   </head>
   <body>
+    <script>if (location.search.includes("surface=main")) document.body.className = "desktop";</script>
     <div id="app"></div>
     <script type="module" src="/main.ts"></script>
   </body>

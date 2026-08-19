@@ -3,11 +3,13 @@
 A macOS menu-bar taskbar for developers, built to the
 [PRD](./PRD%20—%20AI%20Developer%20Taskbar%20with%20Codex.md).
 
-**Phases 1 and 2 are implemented**: the Tauri + Vue shell, menu-bar tray and
+**Phases 1 to 4 are implemented**: the Tauri + Vue shell, menu-bar tray and
 popup, SQLite store, project selection, task management and the focus timer;
-then Codex detection, auth status, app-server communication, read-only
-repository analysis, and goal → plan → task generation. Running tasks *with*
-Codex (phase 3) and verification (phase 4) are still to come.
+agent detection, auth status, read-only repository analysis and goal → plan →
+task generation; running a task with an agent — write access behind an
+explicit confirmation, live activity, approvals, stop and continue; and
+reviewing the result — git changes, a diff viewer, and verification against the
+task's own acceptance criteria.
 
 ## Running
 
@@ -77,6 +79,9 @@ Vue 3 + Pinia (popup UI)
 Tauri 2 ├── tray + popup placement       src-tauri/src/{tray,popup}.rs
         ├── focus timer                  src-tauri/src/focus.rs
         ├── analysis state               src-tauri/src/analysis.rs
+        ├── execution state              src-tauri/src/execution.rs
+        ├── changes + diffs              src-tauri/src/repo.rs
+        ├── verification                 src-tauri/src/verify.rs
         ├── SQLite                       src-tauri/src/db.rs
         ├── plan shape + sanitising      src-tauri/src/plan.rs
         └── agent selection              src-tauri/src/agent.rs
@@ -95,6 +100,62 @@ Database state lives at
 `~/Library/Application Support/com.cleonart.blitzit/blitzit.sqlite3`.
 Migrations run from `MIGRATIONS` in `db.rs`, tracked by `PRAGMA user_version` —
 add a new entry rather than editing an existing one.
+
+## What the Task screen shows
+
+Each task carries how much has gone into it — `3 sessions · 1h 15m on this
+task` — so the cost of a task is visible while you decide whether to keep
+going. The desktop window adds four readings above Today: focus today, tasks
+done, sessions, and average session length over the last seven days.
+
+**The agent panels have been removed from the Task screen** at the user's
+request, so running a task with an agent and verifying it are not reachable
+from the interface. The backend is untouched — `start_execution`,
+`start_verification` and their state, commands and tests all remain — so
+restoring the two panels is a UI change, not a rebuild.
+
+## Running a task
+
+Write access is never implicit. The Task screen offers **Run**, which first
+states what is about to happen — the agent, the project, the branch — and only
+the confirmation actually starts anything.
+
+- **Codex** runs in the `workspace-write` sandbox with an `on-request` approval
+  policy, so anything beyond editing the workspace comes back as a question.
+  Requests are parked by the client, shown as **Reject / Allow once**, and
+  answered with exactly what was chosen. Every path that ends a run declines
+  whatever is still waiting, so a turn is never left hanging on a question
+  nobody will answer.
+- **Claude Code** runs with `--permission-mode acceptEdits`: it may edit files,
+  and anything that would need a prompt is refused, because headless Claude
+  Code has no channel to ask through. Refusals appear in the activity list
+  rather than vanishing.
+
+A task keeps its own conversation (`codex_threads`, one row per agent), so
+**Continue** resumes where a stopped run left off instead of starting cold.
+Stopping interrupts the turn and keeps both the conversation and the code
+already written; the task stays *In Progress*. A finished run moves it to
+*Needs Review* — never to complete, which stays the developer's call.
+
+## Reviewing the work
+
+**Changes** lists what the working tree has changed against `HEAD` — per file,
+with insertions and deletions, and a diff for any one of them. Staged and
+unstaged edits are counted together, and an untracked file is shown as all
+additions rather than skipped.
+
+**Verification** is a second read-only pass. The agent is asked to judge each
+acceptance criterion against the code as it stands and give evidence — the
+file, function or test it found, or plainly what is missing. Two things are
+deliberately not trusted:
+
+- Verdicts are matched back to the task's own criteria by text, falling back to
+  position. A reordered, paraphrased or invented list cannot misreport the
+  result, and a criterion the agent ignored counts as unmet.
+- A claim of `complete` only stands if every criterion actually passed.
+
+The verdict never completes the task. It offers **Keep working** or
+**Complete anyway**, and the choice stays the developer's.
 
 ## Planning is read-only
 
@@ -142,7 +203,13 @@ Nothing Codex proposes becomes a task until the developer presses **Add tasks**.
 | FR-05 Task editing | `views/TaskView.vue` |
 | FR-06 Dependency tracking | `task_dependencies`, shown as "Blocked" |
 | FR-07 Focus timer | `focus.rs`, `stores/focus.ts` |
-| FR-14 Manual completion | Task screen footer |
+| FR-08 Run with an agent | `components/AgentRunPanel.vue`, `*/execution.rs` |
+| FR-09 Live status | activity list in the run panel |
+| FR-10 User approval | `codex/client.rs` routing, run panel prompt |
+| FR-11 Stop / continue | `stop_execution`, `codex_threads` |
+| FR-12 Diff detection | `repo.rs` changes/diff, `views/ChangesView.vue` |
+| FR-13 Verification | [verify.rs](src-tauri/src/verify.rs), `components/VerifyPanel.vue` |
+| FR-14 Manual completion | Task screen footer, verification panel |
 
 FR-08 to FR-13 — running a task with Codex, live activity, approvals,
 stop/resume, diffs and verification — are the next two phases. The Task screen

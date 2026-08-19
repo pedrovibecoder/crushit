@@ -4,7 +4,7 @@
 //! read-only sandbox and the client declines every approval, so analysis can
 //! never write to the user's repository.
 
-use super::client::{CodexClient, Notification};
+use super::client::{CodexClient, Notification, APPROVAL_REQUESTED};
 use crate::error::{Error, Result};
 use crate::plan::{self, AnalysisEvent, AnalysisOutcome};
 use serde_json::{json, Value};
@@ -60,9 +60,38 @@ pub fn run_analysis(
     project_path: &str,
     goal: &str,
     model: Option<&str>,
-    mut on_event: impl FnMut(AnalysisEvent),
+    on_event: impl FnMut(AnalysisEvent),
     is_cancelled: impl Fn() -> bool,
 ) -> Result<AnalysisOutcome> {
+    let (text, thread_id) = run_read_only_turn(
+        client,
+        project_path,
+        &plan::prompt(goal),
+        plan::output_schema(),
+        model,
+        on_event,
+        is_cancelled,
+        "Codex took too long to analyse this project.",
+    )?;
+    Ok(AnalysisOutcome {
+        plan: plan::parse_plan(&text)?,
+        thread_id,
+    })
+}
+
+/// One turn that may only read, constrained to a JSON Schema. Shared by
+/// planning and verification, which differ only in what they ask for.
+#[allow(clippy::too_many_arguments)]
+pub fn run_read_only_turn(
+    client: &CodexClient,
+    project_path: &str,
+    prompt: &str,
+    schema: Value,
+    model: Option<&str>,
+    mut on_event: impl FnMut(AnalysisEvent),
+    is_cancelled: impl Fn() -> bool,
+    timeout_message: &str,
+) -> Result<(String, String)> {
     // Subscribe before starting anything so no notification is missed.
     let events = client.subscribe();
 
@@ -84,8 +113,8 @@ pub fn run_analysis(
 
     let mut turn_params = json!({
         "threadId": thread_id,
-        "input": [{ "type": "text", "text": plan::prompt(goal) }],
-        "outputSchema": plan::output_schema(),
+        "input": [{ "type": "text", "text": prompt }],
+        "outputSchema": schema,
         "sandboxPolicy": { "type": "readOnly", "networkAccess": false },
         "approvalPolicy": "never",
         "cwd": project_path,
@@ -113,7 +142,7 @@ pub fn run_analysis(
                 json!({ "threadId": thread_id }),
                 Duration::from_secs(10),
             );
-            return Err(Error::invalid("Codex took too long to analyse this project."));
+            return Err(Error::invalid(timeout_message));
         }
 
         let Ok(Notification { method, params }) = events.recv_timeout(Duration::from_millis(500))
@@ -130,6 +159,9 @@ pub fn run_analysis(
         }
 
         match method.as_str() {
+            // Planning is read-only, so nothing here may be granted. The
+            // client parks approvals for a human; refuse them immediately.
+            APPROVAL_REQUESTED => client.decline_all_pending(),
             "item/started" => {
                 if let Some((id, label)) = params.get("item").and_then(label_for) {
                     on_event(AnalysisEvent::StepStarted { id, label });
@@ -159,11 +191,8 @@ pub fn run_analysis(
                     return Err(Error::invalid(describe_error(&error)));
                 }
                 let text = latest_message
-                    .ok_or_else(|| Error::invalid("Codex finished without returning a plan."))?;
-                return Ok(AnalysisOutcome {
-                    plan: plan::parse_plan(&text)?,
-                    thread_id,
-                });
+                    .ok_or_else(|| Error::invalid("Codex finished without answering."))?;
+                return Ok((text, thread_id));
             }
             _ => {}
         }

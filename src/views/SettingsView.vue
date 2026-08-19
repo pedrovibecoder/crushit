@@ -6,10 +6,19 @@ import PanelHeader from "../components/PanelHeader.vue";
 import SelectMenu, { type SelectOption } from "../components/SelectMenu.vue";
 import ToggleSwitch from "../components/ToggleSwitch.vue";
 import { ipc } from "../lib/ipc";
+import { SHORTCUTS } from "../lib/shortcuts";
 import { shortenPath } from "../lib/format";
 import { useAgentStore } from "../stores/agent";
 import { useAppStore } from "../stores/app";
-import { AGENTS, AGENT_LABELS, type Agent, type ShortcutInfo } from "../types";
+import {
+  AGENTS,
+  AGENT_LABELS,
+  THEMES,
+  THEME_LABELS,
+  type Agent,
+  type ShortcutInfo,
+  type Theme,
+} from "../types";
 
 const app = useAppStore();
 const agents = useAgentStore();
@@ -90,7 +99,7 @@ async function reveal() {
   <div class="flex flex-col">
     <PanelHeader eyebrow="Blitzit" title="Settings" back @back="app.back()" />
 
-    <div class="max-h-[380px] overflow-y-auto px-3.5 pb-3.5">
+    <div class="panel-scroll px-3.5 pb-3.5">
       <section>
         <h2 class="eyebrow">Project</h2>
         <div v-if="app.activeProject" class="card mt-1.5 px-3 py-3">
@@ -145,7 +154,7 @@ async function reveal() {
             class="flex-1 rounded-[8px] py-1.5 text-[11.5px] font-semibold transition-colors"
             :class="
               selected === option
-                ? 'bg-card text-ink shadow-sm'
+                ? 'bg-solid text-on-solid'
                 : 'text-ink-2 hover:text-ink'
             "
             @click="chooseAgent(option)"
@@ -256,7 +265,7 @@ async function reveal() {
             class="tnum flex-1 rounded-[9px] border py-1.5 text-[11.5px] font-semibold transition-colors"
             :class="
               app.settings.focusMinutes === minutes
-                ? 'border-ink bg-ink text-white'
+                ? 'border-solid bg-solid text-on-solid'
                 : 'border-line bg-card text-ink-2 hover:bg-line-soft'
             "
             @click="app.updateSettings({ focusMinutes: minutes })"
@@ -279,6 +288,25 @@ async function reveal() {
       </section>
 
       <section class="mt-4">
+        <h2 class="eyebrow">Appearance</h2>
+        <div class="mt-1.5 flex gap-1 rounded-[11px] border border-line bg-line-soft/60 p-1">
+          <button
+            v-for="option in THEMES"
+            :key="option"
+            class="flex-1 rounded-[8px] py-1.5 text-[11.5px] font-semibold transition-colors"
+            :class="
+              app.settings.theme === option
+                ? 'bg-solid text-on-solid'
+                : 'text-ink-2 hover:text-ink'
+            "
+            @click="app.updateSettings({ theme: option as Theme })"
+          >
+            {{ THEME_LABELS[option] }}
+          </button>
+        </div>
+      </section>
+
+      <section class="mt-4">
         <h2 class="eyebrow">Menu bar</h2>
         <div class="card mt-1.5 divide-y divide-line px-3">
           <ToggleSwitch
@@ -292,6 +320,21 @@ async function reveal() {
             label="Close when it loses focus"
             hint="Behaves like other menu-bar extras"
             @update:model-value="app.updateSettings({ hidePopupOnBlur: $event })"
+          />
+        </div>
+
+        <div class="card mt-1.5 divide-y divide-line px-3">
+          <ToggleSwitch
+            :model-value="app.settings.notifications"
+            label="Notify me"
+            hint="When a session ends, a run finishes, or an agent needs you"
+            @update:model-value="app.updateSettings({ notifications: $event })"
+          />
+          <ToggleSwitch
+            :model-value="app.settings.launchAtLogin"
+            label="Launch at login"
+            hint="Blitzit starts in the menu bar when you log in"
+            @update:model-value="app.updateSettings({ launchAtLogin: $event })"
           />
         </div>
 
@@ -311,6 +354,24 @@ async function reveal() {
           <span v-if="shortcut?.combo" class="chip shrink-0 font-semibold">
             {{ shortcut.combo }}
           </span>
+        </div>
+      </section>
+
+      <section class="mt-4">
+        <h2 class="eyebrow">Shortcuts</h2>
+        <div class="card mt-1.5 divide-y divide-line px-3">
+          <div
+            v-for="shortcut in SHORTCUTS"
+            :key="shortcut.combo"
+            class="flex items-center justify-between gap-2 py-1.5"
+          >
+            <span class="text-[12px]">{{ shortcut.label }}</span>
+            <span class="chip shrink-0 font-semibold">{{ shortcut.combo }}</span>
+          </div>
+          <div class="flex items-center justify-between gap-2 py-1.5">
+            <span class="text-[12px]">Back, or close</span>
+            <span class="chip shrink-0 font-semibold">Esc</span>
+          </div>
         </div>
       </section>
 

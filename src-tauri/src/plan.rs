@@ -194,6 +194,16 @@ pub fn parse_plan(text: &str) -> Result<Plan> {
     sanitise(plan)
 }
 
+/// Parses any JSON object out of an agent's answer, tolerating a code fence or
+/// a sentence wrapped around it.
+pub fn parse_json_object<T: serde::de::DeserializeOwned>(text: &str) -> serde_json::Result<T> {
+    let unfenced = unwrap_fence(text);
+    serde_json::from_str(unfenced).or_else(|first| match extract_json_object(unfenced) {
+        Some(object) => serde_json::from_str(object),
+        None => Err(first),
+    })
+}
+
 /// Same, for an agent that hands back an already-parsed object.
 pub fn plan_from_value(value: &Value) -> Result<Plan> {
     let plan: Plan = serde_json::from_value(value.clone())

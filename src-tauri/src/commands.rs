@@ -28,6 +28,8 @@ pub struct Bootstrap {
     pub focus: FocusSnapshot,
     pub analysis: AnalysisSnapshot,
     pub goal: Option<Goal>,
+    pub execution: ExecutionSnapshot,
+    pub verification: VerificationSnapshot,
 }
 
 fn notify_tasks_changed(app: &AppHandle) {
@@ -49,6 +51,8 @@ pub fn bootstrap(
     db: State<'_, Db>,
     focus_state: State<'_, FocusState>,
     analysis: State<'_, AnalysisState>,
+    execution: State<'_, ExecutionState>,
+    verification: State<'_, VerificationState>,
 ) -> Result<Bootstrap> {
     let conn = db.conn();
     let settings = db::get_settings(&conn)?;
@@ -65,6 +69,8 @@ pub fn bootstrap(
         None => (Vec::new(), None),
     };
     Ok(Bootstrap {
+        verification: verification.snapshot(),
+        execution: execution.snapshot(),
         analysis: analysis.snapshot(),
         goal,
         settings,
@@ -375,6 +381,12 @@ pub fn stop_focus(
 
 // ----------------------------------------------------------------- settings
 
+/// A small read on how the work is going, for the desktop window.
+#[tauri::command]
+pub fn performance_stats(db: State<'_, Db>) -> Result<db::Stats> {
+    db::stats(&db.conn())
+}
+
 #[tauri::command]
 pub fn get_settings(db: State<'_, Db>) -> Result<Settings> {
     db::get_settings(&db.conn())
@@ -382,6 +394,7 @@ pub fn get_settings(db: State<'_, Db>) -> Result<Settings> {
 
 #[tauri::command]
 pub fn update_settings(
+    app: AppHandle,
     db: State<'_, Db>,
     cache: State<'_, agent::StatusCache>,
     patch: SettingsPatch,
@@ -390,7 +403,22 @@ pub fn update_settings(
     if patch.codex_path.is_some() || patch.claude_path.is_some() {
         cache.clear();
     }
+    if let Some(wanted) = patch.launch_at_login {
+        apply_autostart(&app, wanted);
+    }
     db::update_settings(&db.conn(), &patch)
+}
+
+/// Registers or removes the login item. Reported back through the settings
+/// read, so a refusal by the system shows up rather than being assumed.
+pub fn apply_autostart(app: &AppHandle, wanted: bool) {
+    use tauri_plugin_autostart::ManagerExt;
+    let manager = app.autolaunch();
+    let _ = if wanted {
+        manager.enable()
+    } else {
+        manager.disable()
+    };
 }
 
 // ------------------------------------------------------------------- window
@@ -398,6 +426,26 @@ pub fn update_settings(
 #[tauri::command]
 pub fn hide_popup(app: AppHandle) -> Result<()> {
     popup::hide(&app)
+}
+
+/// Raises the desktop window — the "open in a real window" action.
+#[tauri::command]
+pub fn open_desktop_window(app: AppHandle) -> Result<()> {
+    // Opening the window is a deliberate switch of surface, so the popup gets
+    // out of the way rather than hovering over it.
+    let _ = popup::hide(&app);
+    crate::desktop::show(&app)
+}
+
+/// Returns the application to the menu bar without quitting.
+#[tauri::command]
+pub fn hide_desktop_window(app: AppHandle) -> Result<()> {
+    crate::desktop::hide(&app)
+}
+
+#[tauri::command]
+pub fn desktop_window_open(app: AppHandle) -> bool {
+    crate::desktop::is_open(&app)
 }
 
 /// Grows or shrinks the popup to match the rendered content height.
@@ -632,6 +680,7 @@ fn spawn_analysis_worker(
             };
             let _ = app.emit("codex:analysis", &snapshot);
         };
+        let cancel_flag = analysis.cancel_flag();
         let is_cancelled = || analysis.is_cancelled();
 
         let outcome = match chosen {
@@ -655,7 +704,7 @@ fn spawn_analysis_worker(
                 &goal.prompt,
                 model.as_deref(),
                 &mut on_event,
-                is_cancelled,
+                cancel_flag,
             ),
         };
 
@@ -672,10 +721,20 @@ fn spawn_analysis_worker(
 
         let snapshot = match outcome {
             Ok(result) => {
+                let tasks = result.plan.tasks.len();
                 let stored =
                     db::set_goal_plan(&database.conn(), goal.id, &result.thread_id, &result.plan);
                 match stored {
-                    Ok(_) => analysis.succeeded(),
+                    Ok(_) => {
+                        crate::notify::send(
+                            &app,
+                            crate::notify::Event::PlanReady {
+                                goal: &goal.title,
+                                tasks,
+                            },
+                        );
+                        analysis.succeeded()
+                    }
                     Err(error) => analysis.failed(error.to_string()),
                 }
             }
@@ -754,4 +813,431 @@ pub fn discard_plan(
     let _ = app.emit("codex:analysis", &snapshot);
     let _ = app.emit("goals:changed", ());
     Ok(())
+}
+
+// ---------------------------------------------------------------- execution
+
+use crate::execution::{ExecutionSnapshot, ExecutionState};
+use crate::run::{RunEvent, RunOutcome};
+
+#[tauri::command]
+pub fn execution_snapshot(execution: State<'_, ExecutionState>) -> ExecutionSnapshot {
+    execution.snapshot()
+}
+
+/// Whether this task already has a conversation with the selected agent, which
+/// is what makes "Continue" meaningful rather than a second cold start.
+#[tauri::command]
+pub fn task_has_thread(db: State<'_, Db>, task_id: i64) -> Result<bool> {
+    let conn = db.conn();
+    let agent = db::get_settings(&conn)?.agent;
+    Ok(db::task_thread(&conn, task_id, agent)?.is_some())
+}
+
+/// Hands a task to the selected agent **with write access**.
+///
+/// The confirmation the PRD requires happens in the UI before this is called;
+/// reaching here is the explicit action that enables writes.
+#[tauri::command]
+pub fn start_execution(
+    app: AppHandle,
+    db: State<'_, Db>,
+    cache: State<'_, agent::StatusCache>,
+    execution: State<'_, ExecutionState>,
+    task_id: i64,
+    resume: Option<bool>,
+) -> Result<Task> {
+    if execution.is_active() {
+        return Err(Error::invalid("a task is already running"));
+    }
+
+    let (task, project, chosen, model, thread) = {
+        let conn = db.conn();
+        let settings = db::get_settings(&conn)?;
+        let chosen = settings.agent;
+        let task = db::get_task(&conn, task_id)?;
+        let project =
+            db::find_project(&conn, task.project_id)?.ok_or(Error::NotFound("project"))?;
+        // Continuing reuses the task's own conversation; starting fresh does not.
+        let thread = match resume.unwrap_or(false) {
+            true => db::task_thread(&conn, task_id, chosen)?,
+            false => None,
+        };
+        let task = db::update_task(
+            &conn,
+            task_id,
+            &TaskPatch {
+                status: Some(TaskStatus::InProgress),
+                ..Default::default()
+            },
+        )?;
+        (task, project, chosen, configured_model(&settings, chosen), thread)
+    };
+    let binary = agent_binary(&db, &cache, chosen)?;
+
+    let snapshot = execution.begin(task.id, task.title.clone(), chosen);
+    let _ = app.emit("execution:changed", &snapshot);
+    notify_tasks_changed(&app);
+
+    spawn_execution_worker(app, task.clone(), project.path, chosen, binary, model, thread);
+    Ok(task)
+}
+
+fn spawn_execution_worker(
+    app: AppHandle,
+    task: Task,
+    project_path: String,
+    chosen: Agent,
+    binary: std::path::PathBuf,
+    model: Option<String>,
+    resume_thread: Option<String>,
+) {
+    std::thread::spawn(move || {
+        let execution = app.state::<ExecutionState>();
+        let database = app.state::<Db>();
+        let mut guard = ExecutionGuard {
+            execution: &execution,
+            app: &app,
+            resolved: false,
+        };
+
+        let mut on_event = |event: RunEvent| {
+            let snapshot = match event {
+                RunEvent::Thread(id) => {
+                    let _ = db::save_task_thread(
+                        &database.conn(),
+                        task.id,
+                        chosen,
+                        &id,
+                        "running",
+                    );
+                    execution.set_thread(id)
+                }
+                RunEvent::Started { id, label, kind } => execution.step_started(id, label, kind),
+                RunEvent::Finished { id } => execution.step_finished(&id),
+                RunEvent::FileChanged(path) => execution.file_changed(path),
+                RunEvent::Approval(request) => {
+                    // Blocked work is the one thing that cannot wait to be seen.
+                    crate::notify::send(
+                        &app,
+                        crate::notify::Event::ApprovalNeeded { task: &task.title },
+                    );
+                    execution.awaiting(request)
+                }
+                RunEvent::ApprovalResolved => execution.approval_resolved(),
+                // The closing message is kept for the summary, not the list.
+                RunEvent::Message(_) => execution.snapshot(),
+            };
+            let _ = app.emit("execution:changed", &snapshot);
+        };
+
+        let outcome: Result<RunOutcome> = match chosen {
+            Agent::Codex => {
+                let client = app.state::<CodexClient>();
+                let version = app.package_info().version.to_string();
+                client.ensure_started(&binary, &version).and_then(|()| {
+                    crate::codex::execution::run_task(
+                        &client,
+                        &project_path,
+                        &task,
+                        resume_thread.as_deref(),
+                        model.as_deref(),
+                        &mut on_event,
+                        || execution.is_cancelled(),
+                        || execution.is_awaiting_approval(),
+                    )
+                })
+            }
+            Agent::ClaudeCode => crate::claude::execution::run_task(
+                &binary,
+                &project_path,
+                &task,
+                resume_thread.as_deref(),
+                model.as_deref(),
+                &mut on_event,
+                execution.cancel_flag(),
+            ),
+        };
+
+        let cancelled = execution.is_cancelled();
+        let snapshot = match outcome {
+            Ok(result) => {
+                let conn = database.conn();
+                if !result.thread_id.is_empty() {
+                    let status = if cancelled { "stopped" } else { "finished" };
+                    let _ =
+                        db::save_task_thread(&conn, task.id, chosen, &result.thread_id, status);
+                }
+                // Stopping leaves the task in progress; finishing asks for review.
+                // Neither completes it — that stays the developer's call.
+                if !cancelled {
+                    let _ = db::update_task(
+                        &conn,
+                        task.id,
+                        &TaskPatch {
+                            status: Some(TaskStatus::NeedsReview),
+                            ..Default::default()
+                        },
+                    );
+                }
+                drop(conn);
+                execution.succeeded(result.summary)
+            }
+            Err(error) => execution.failed(error.to_string()),
+        };
+
+        if !cancelled {
+            let event = match snapshot.error.is_some() {
+                true => crate::notify::Event::RunFailed { task: &task.title },
+                false => crate::notify::Event::RunFinished {
+                    task: &task.title,
+                    changed: snapshot.changed_files.len(),
+                },
+            };
+            crate::notify::send(&app, event);
+        }
+
+        guard.resolved = true;
+        let _ = app.emit("execution:changed", &snapshot);
+        notify_tasks_changed(&app);
+    });
+}
+
+/// Marks an unfinished run failed when the worker leaves by any path.
+struct ExecutionGuard<'a> {
+    execution: &'a ExecutionState,
+    app: &'a AppHandle,
+    resolved: bool,
+}
+
+impl Drop for ExecutionGuard<'_> {
+    fn drop(&mut self) {
+        if self.resolved {
+            return;
+        }
+        let snapshot = self.execution.failed("The run stopped unexpectedly.".into());
+        let _ = self.app.emit("execution:changed", &snapshot);
+    }
+}
+
+/// Interrupts the run. The conversation and the code already written are kept.
+#[tauri::command]
+pub fn stop_execution(
+    app: AppHandle,
+    client: State<'_, CodexClient>,
+    execution: State<'_, ExecutionState>,
+) -> ExecutionSnapshot {
+    if execution.is_active() {
+        // Nothing may be left waiting on a person who has walked away.
+        client.decline_all_pending();
+        execution.request_cancel();
+        return execution.snapshot();
+    }
+    let snapshot = execution.clear();
+    let _ = app.emit("execution:changed", &snapshot);
+    snapshot
+}
+
+/// Answers the agent's permission request. Only ever what the user chose.
+#[tauri::command]
+pub fn respond_to_approval(
+    app: AppHandle,
+    client: State<'_, CodexClient>,
+    execution: State<'_, ExecutionState>,
+    approve: bool,
+) -> Result<ExecutionSnapshot> {
+    let approval = execution
+        .snapshot()
+        .approval
+        .ok_or_else(|| Error::invalid("nothing is waiting for approval"))?;
+    client.answer_approval(approval.id, if approve { "accept" } else { "decline" })?;
+    let snapshot = execution.approval_resolved();
+    let _ = app.emit("execution:changed", &snapshot);
+    Ok(snapshot)
+}
+
+/// Dismisses a finished or failed run from the screen.
+#[tauri::command]
+pub fn clear_execution(app: AppHandle, execution: State<'_, ExecutionState>) -> ExecutionSnapshot {
+    let snapshot = execution.clear();
+    let _ = app.emit("execution:changed", &snapshot);
+    snapshot
+}
+
+// ------------------------------------------------------- changes and review
+
+use crate::repo::RepoChanges;
+use crate::verify::{self, VerificationSnapshot, VerificationState};
+
+/// What the working tree has changed, for the review step.
+#[tauri::command]
+pub fn repo_changes(db: State<'_, Db>) -> Result<RepoChanges> {
+    let conn = db.conn();
+    let settings = db::get_settings(&conn)?;
+    let Some(project_id) = settings.active_project_id else {
+        return Ok(RepoChanges::default());
+    };
+    let project = db::find_project(&conn, project_id)?.ok_or(Error::NotFound("project"))?;
+    drop(conn);
+    Ok(crate::repo::changes(std::path::Path::new(&project.path)))
+}
+
+/// The unified diff for one changed file.
+#[tauri::command]
+pub fn file_diff(db: State<'_, Db>, path: String) -> Result<String> {
+    let conn = db.conn();
+    let settings = db::get_settings(&conn)?;
+    let project_id = settings
+        .active_project_id
+        .ok_or_else(|| Error::invalid("no project is selected"))?;
+    let project = db::find_project(&conn, project_id)?.ok_or(Error::NotFound("project"))?;
+    drop(conn);
+    crate::repo::file_diff(std::path::Path::new(&project.path), &path)
+        .ok_or_else(|| Error::invalid("that file has no diff to show"))
+}
+
+#[tauri::command]
+pub fn verification_snapshot(state: State<'_, VerificationState>) -> VerificationSnapshot {
+    state.snapshot()
+}
+
+/// Checks the work against the task's criteria. Read-only, like planning.
+#[tauri::command]
+pub fn start_verification(
+    app: AppHandle,
+    db: State<'_, Db>,
+    cache: State<'_, agent::StatusCache>,
+    state: State<'_, VerificationState>,
+    task_id: i64,
+) -> Result<VerificationSnapshot> {
+    if state.is_running() {
+        return Err(Error::invalid("a verification is already running"));
+    }
+
+    let (task, project, chosen, model) = {
+        let conn = db.conn();
+        let settings = db::get_settings(&conn)?;
+        let task = db::get_task(&conn, task_id)?;
+        if task.criteria.is_empty() {
+            return Err(Error::invalid(
+                "add at least one acceptance criterion before verifying",
+            ));
+        }
+        let project =
+            db::find_project(&conn, task.project_id)?.ok_or(Error::NotFound("project"))?;
+        (
+            task,
+            project,
+            settings.agent,
+            configured_model(&settings, settings.agent),
+        )
+    };
+    let binary = agent_binary(&db, &cache, chosen)?;
+
+    let snapshot = state.begin(task.id, task.title.clone());
+    let _ = app.emit("verification:changed", &snapshot);
+    spawn_verification_worker(app, task, project.path, chosen, binary, model);
+    Ok(snapshot)
+}
+
+fn spawn_verification_worker(
+    app: AppHandle,
+    task: Task,
+    project_path: String,
+    chosen: Agent,
+    binary: std::path::PathBuf,
+    model: Option<String>,
+) {
+    std::thread::spawn(move || {
+        let state = app.state::<VerificationState>();
+        let database = app.state::<Db>();
+        let mut guard = VerificationGuard {
+            state: &state,
+            app: &app,
+            resolved: false,
+        };
+
+        let mut on_event = |event: AnalysisEvent| {
+            let snapshot = match event {
+                AnalysisEvent::StepStarted { id, label } => state.step_started(id, label),
+                AnalysisEvent::StepFinished { id } => state.step_finished(&id),
+            };
+            let _ = app.emit("verification:changed", &snapshot);
+        };
+
+        let answer: Result<(String, String)> = match chosen {
+            Agent::Codex => {
+                let client = app.state::<CodexClient>();
+                let version = app.package_info().version.to_string();
+                client.ensure_started(&binary, &version).and_then(|()| {
+                    crate::codex::planning::run_read_only_turn(
+                        &client,
+                        &project_path,
+                        &verify::prompt(&task),
+                        verify::output_schema(),
+                        model.as_deref(),
+                        &mut on_event,
+                        || state.is_cancelled(),
+                        "Codex took too long to verify this task.",
+                    )
+                })
+            }
+            Agent::ClaudeCode => crate::claude::planning::run_read_only(
+                &binary,
+                &project_path,
+                &format!("{}{}", verify::prompt(&task), verify::json_instruction()),
+                model.as_deref(),
+                &mut on_event,
+                state.cancel_flag(),
+                "Claude Code took too long to verify this task.",
+            ),
+        };
+
+        if state.is_cancelled() {
+            guard.resolved = true;
+            let snapshot = state.clear();
+            let _ = app.emit("verification:changed", &snapshot);
+            return;
+        }
+
+        let snapshot = match answer.and_then(|(text, _)| verify::parse(&text, &task)) {
+            Ok(result) => {
+                let _ = db::save_verification(&database.conn(), task.id, &result);
+                state.succeeded(result)
+            }
+            Err(error) => state.failed(error.to_string()),
+        };
+        guard.resolved = true;
+        let _ = app.emit("verification:changed", &snapshot);
+    });
+}
+
+struct VerificationGuard<'a> {
+    state: &'a VerificationState,
+    app: &'a AppHandle,
+    resolved: bool,
+}
+
+impl Drop for VerificationGuard<'_> {
+    fn drop(&mut self) {
+        if self.resolved {
+            return;
+        }
+        let snapshot = self.state.failed("Verification stopped unexpectedly.".into());
+        let _ = self.app.emit("verification:changed", &snapshot);
+    }
+}
+
+#[tauri::command]
+pub fn cancel_verification(
+    app: AppHandle,
+    state: State<'_, VerificationState>,
+) -> VerificationSnapshot {
+    if state.is_running() {
+        state.request_cancel();
+        return state.snapshot();
+    }
+    let snapshot = state.clear();
+    let _ = app.emit("verification:changed", &snapshot);
+    snapshot
 }

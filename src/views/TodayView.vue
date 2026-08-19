@@ -4,9 +4,12 @@ import AppIcon from "../components/AppIcon.vue";
 import NewTaskForm from "../components/NewTaskForm.vue";
 import PanelHeader from "../components/PanelHeader.vue";
 import ProgressBar from "../components/ProgressBar.vue";
+import StatsCards from "../components/StatsCards.vue";
 import TaskRow from "../components/TaskRow.vue";
+import { ipc } from "../lib/ipc";
 import { useAppStore } from "../stores/app";
 import { useAgentStore } from "../stores/agent";
+import { useExecutionStore } from "../stores/execution";
 import { useFocusStore } from "../stores/focus";
 import { useTasksStore } from "../stores/tasks";
 import { AGENT_LABELS, type NewTask, type Task } from "../types";
@@ -15,6 +18,7 @@ const app = useAppStore();
 const tasks = useTasksStore();
 const focus = useFocusStore();
 const codex = useAgentStore();
+const execution = useExecutionStore();
 const agentName = computed(() => AGENT_LABELS[codex.selected]);
 
 type Filter = "all" | "open" | "done";
@@ -67,6 +71,10 @@ async function add(input: NewTask) {
       </template>
     </PanelHeader>
 
+    <div v-if="app.isDesktop" class="px-3.5 pb-2.5">
+      <StatsCards />
+    </div>
+
     <div class="px-3.5 pb-2.5">
       <div class="card px-3 py-2.5">
         <div class="flex items-baseline justify-between gap-2">
@@ -87,10 +95,42 @@ async function add(input: NewTask) {
       </div>
     </div>
 
-    <!-- A run started here keeps going with the popup closed, so Today has to
-         be able to lead back to it. -->
+    <!-- A run keeps going with the popup closed, so Today has to lead back to
+         it — especially when it is blocked on a question. -->
     <button
-      v-if="codex.isAnalyzing || codex.plan"
+      v-if="execution.isActive && execution.snapshot.taskId"
+      class="card mx-3.5 mb-2.5 flex items-center gap-2.5 px-3 py-2 text-left transition-colors"
+      :class="
+        execution.isAwaitingApproval
+          ? 'border-warn/40 bg-warn-soft/70 hover:bg-warn-soft'
+          : 'border-accent/35 bg-accent-soft/50 hover:bg-accent-soft'
+      "
+      @click="app.openTask(execution.snapshot.taskId)"
+    >
+      <AppIcon
+        :name="execution.isAwaitingApproval ? 'close' : 'sparkle'"
+        :size="13"
+        filled
+        class="shrink-0"
+        :class="execution.isAwaitingApproval ? 'text-warn' : 'text-accent'"
+      />
+      <span class="min-w-0 flex-1">
+        <span class="block truncate text-[12px] font-semibold">
+          {{
+            execution.isAwaitingApproval
+              ? `${agentName} needs approval`
+              : `${agentName} is working`
+          }}
+        </span>
+        <span class="block truncate text-[11px] text-ink-2">
+          {{ execution.snapshot.taskTitle }}
+        </span>
+      </span>
+      <AppIcon name="forward" :size="13" class="shrink-0 text-ink-3" />
+    </button>
+
+    <button
+      v-else-if="codex.isAnalyzing || codex.plan"
       class="card mx-3.5 mb-2.5 flex items-center gap-2.5 border-accent/35 bg-accent-soft/50 px-3 py-2 text-left transition-colors hover:bg-accent-soft"
       @click="app.go('goal')"
     >
@@ -117,7 +157,7 @@ async function add(input: NewTask) {
         class="rounded-[8px] px-2.5 py-1 text-[11.5px] font-semibold transition-colors"
         :class="
           filter === option.id
-            ? 'bg-ink text-white'
+            ? 'bg-solid text-on-solid'
             : 'text-ink-2 hover:bg-line-soft'
         "
         @click="filter = option.id"
@@ -126,23 +166,25 @@ async function add(input: NewTask) {
       </button>
     </div>
 
-    <div class="max-h-[360px] space-y-1.5 overflow-y-auto px-3.5 pb-3">
+    <div class="space-y-1.5 panel-scroll px-3.5 pb-3">
       <NewTaskForm
         v-if="app.activeProject"
         :project-id="app.activeProject.id"
         @submit="add"
       />
 
-      <TaskRow
-        v-for="task in visible"
-        :key="task.id"
-        :task="task"
-        :focused="focus.isFocused(task.id)"
-        :remaining-seconds="focus.snapshot.remainingSeconds"
-        :blocked-by="tasks.blockedBy(task)"
-        @open="app.openTask(task.id)"
-        @toggle="tasks.toggleComplete(task)"
-      />
+      <TransitionGroup name="row" tag="div" class="relative space-y-1.5">
+        <TaskRow
+          v-for="task in visible"
+          :key="task.id"
+          :task="task"
+          :focused="focus.isFocused(task.id)"
+          :remaining-seconds="focus.snapshot.remainingSeconds"
+          :blocked-by="tasks.blockedBy(task)"
+          @open="app.openTask(task.id)"
+          @toggle="tasks.toggleComplete(task)"
+        />
+      </TransitionGroup>
 
       <p
         v-if="visible.length === 0"
@@ -156,12 +198,25 @@ async function add(input: NewTask) {
       </p>
     </div>
 
-    <footer class="border-t border-line px-3.5 py-2.5">
-      <button
-        class="btn btn-ghost w-full py-2 text-[12px]"
-        @click="app.go('goal')"
-      >
+    <footer class="flex items-center gap-2 border-t border-line px-3.5 py-2.5">
+      <button class="btn btn-ghost flex-1 py-2 text-[12px]" @click="app.go('goal')">
         <AppIcon name="sparkle" :size="13" filled />New goal
+      </button>
+      <button
+        class="btn btn-ghost px-2.5 py-2"
+        title="Review changes"
+        aria-label="Review changes"
+        @click="app.go('changes')"
+      >
+        <AppIcon name="branch" :size="13" />
+      </button>
+      <button
+        class="btn btn-ghost px-2.5 py-2"
+        title="Open in a window"
+        aria-label="Open in a window"
+        @click="ipc.openDesktopWindow()"
+      >
+        <AppIcon name="expand" :size="13" />
       </button>
     </footer>
   </div>
