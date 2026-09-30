@@ -9,6 +9,8 @@ const asDay = (offset: number) => {
 };
 const TODAY = asDay(0);
 const YESTERDAY = asDay(-1);
+const NEXT_WEEK = asDay(5);
+const TOMORROW = asDay(1);
 
 const PROJECT = {
   id: 1,
@@ -25,6 +27,7 @@ const TASKS = [
     id: 1,
     projectId: 1,
     goalId: 1,
+    groupId: 1,
     title: "Wire real permission key into customer menu entry",
     description: "Render an invoice to a PDF buffer.",
     category: "task",
@@ -45,6 +48,7 @@ const TASKS = [
       { id: 5, taskId: 1, text: "Handle generation errors", isMet: false, position: 4 },
     ],
     files: ["src/services/invoice.ts", "src/models/invoice.ts"],
+    tags: ["fe"],
     dependsOn: [],
     focusSeconds: 4500,
     focusSessions: 3,
@@ -53,6 +57,7 @@ const TASKS = [
     id: 2,
     projectId: 1,
     goalId: 1,
+    groupId: 1,
     title: "Audit and complete customer i18n coverage",
     description: null,
     category: "task",
@@ -60,13 +65,14 @@ const TASKS = [
     position: 1,
     estimateMinutes: 30,
     storyPoints: 3,
-    plannedFor: TODAY,
+    plannedFor: TOMORROW,
     isAiGenerated: true,
     createdAt: 0,
     updatedAt: 0,
     completedAt: null,
     criteria: [],
     files: [],
+    tags: ["fe", "be"],
     dependsOn: [1],
     focusSeconds: 0,
     focusSessions: 0,
@@ -75,6 +81,7 @@ const TASKS = [
     id: 3,
     projectId: 1,
     goalId: 1,
+    groupId: 2,
     title: "Verify service endpoints against api_spec.json",
     description: null,
     category: "bug",
@@ -89,6 +96,7 @@ const TASKS = [
     completedAt: null,
     criteria: [],
     files: [],
+    tags: ["be"],
     dependsOn: [2],
     focusSeconds: 0,
     focusSessions: 0,
@@ -97,6 +105,7 @@ const TASKS = [
     id: 4,
     projectId: 1,
     goalId: 1,
+    groupId: null,
     title: "Create design-code doc and registry row for the customer screen",
     description: null,
     category: "design",
@@ -104,13 +113,14 @@ const TASKS = [
     position: 3,
     estimateMinutes: 25,
     storyPoints: 3,
-    plannedFor: TODAY,
+    plannedFor: null,
     isAiGenerated: true,
     createdAt: 0,
     updatedAt: 0,
     completedAt: null,
     criteria: [],
     files: [],
+    tags: ["devops"],
     dependsOn: [],
     focusSeconds: 0,
     focusSessions: 0,
@@ -119,6 +129,7 @@ const TASKS = [
     id: 5,
     projectId: 1,
     goalId: null,
+    groupId: null,
     title: "Add tests for customer table, modal, and page hook",
     description: null,
     category: "task",
@@ -133,11 +144,55 @@ const TASKS = [
     completedAt: 1,
     criteria: [],
     files: [],
+    tags: [],
     dependsOn: [],
     focusSeconds: 0,
     focusSessions: 0,
   },
 ];
+
+const TASK_GROUPS = [
+  { id: 1, projectId: 1, name: "Sprint 12", position: 0, createdAt: 0 },
+  { id: 2, projectId: 1, name: "Invoice work", position: 1, createdAt: 0 },
+];
+
+const TAGS = [
+  { id: 1, slug: "fe", label: "FE", color: "#4a9bf5", position: 0 },
+  { id: 2, slug: "be", label: "BE", color: "#7b61ff", position: 1 },
+  { id: 3, slug: "devops", label: "Devops", color: "#3fbf6a", position: 2 },
+];
+
+/** Deliberately out of order, and in the shape real titles take. */
+const NUMBERED = [
+  "<Project Number> [FE] Add new input [Project Number] on Project",
+  "<Project Number> [BE] Update [Project] Serializer",
+  "<Project Number> [FE] Add [Project Number] text on project detail",
+  "<Project Number> [BE] Add new field [Project Number]",
+].map((title, index) => ({
+  id: 20 + index,
+  projectId: 1,
+  goalId: null,
+  groupId: null,
+  title,
+  description: null,
+  category: "task",
+  status: "ready",
+  position: 20 + index,
+  estimateMinutes: null,
+  storyPoints: 2,
+  plannedFor: TODAY,
+  isAiGenerated: false,
+  createdAt: 0,
+  updatedAt: 0,
+  completedAt: null,
+  criteria: [],
+  files: [],
+  tags: [title.includes("[FE]") ? "fe" : "be"],
+  dependsOn: [],
+  focusSeconds: 0,
+  focusSessions: 0,
+}));
+TASKS.push(...NUMBERED);
 
 const CATEGORIES = [
   { id: 1, slug: "task", label: "Task", color: "#4a9bf5", position: 0 },
@@ -429,8 +484,10 @@ export async function invoke(command: string, args?: unknown): Promise<unknown> 
         settings: SETTINGS,
         projects: [PROJECT, { ...PROJECT, id: 2, name: "storefront", path: "/Users/dev/projects/storefront", branch: "main" }],
         activeProject: PROJECT,
-        tasks: TASKS,
+        tasks: [...TASKS],
+        taskGroups: [...TASK_GROUPS],
         categories: CATEGORIES,
+        tags: [...TAGS],
         focus: FOCUS,
         rest: REST,
         analysis: ANALYSIS,
@@ -439,7 +496,123 @@ export async function invoke(command: string, args?: unknown): Promise<unknown> 
         verification: VERIFICATION,
       };
     case "list_tasks":
-      return TASKS;
+      return [...TASKS];
+    // Enough of a write to review the screens that add or move work.
+    case "create_task": {
+      const input = (args as { input?: Record<string, unknown> })?.input ?? {};
+      const task = {
+        ...TASKS[0],
+        id: 100 + TASKS.length,
+        goalId: null,
+        groupId: null,
+        description: null,
+        status: "ready",
+        estimateMinutes: null,
+        storyPoints: null,
+        isAiGenerated: false,
+        completedAt: null,
+        criteria: [],
+        files: [],
+        dependsOn: [],
+        focusSeconds: 0,
+        focusSessions: 0,
+        plannedFor: null,
+        ...input,
+      };
+      TASKS.push(task);
+      return { ...task };
+    }
+    case "update_task": {
+      const { taskId, patch } = (args ?? {}) as { taskId?: number; patch?: Record<string, unknown> };
+      const task = TASKS.find((candidate) => candidate.id === taskId);
+      if (task) Object.assign(task, patch ?? {});
+      // A copy, not the stored object: the interface keeps its own list, and
+      // handing back the same reference would leave Vue nothing to notice.
+      return task && { ...task };
+    }
+    case "list_task_groups":
+      return [...TASK_GROUPS];
+    case "create_task_group":
+      TASK_GROUPS.push({
+        id: TASK_GROUPS.length + 1,
+        projectId: 1,
+        name: String((args as { name?: string })?.name ?? "Group"),
+        position: TASK_GROUPS.length,
+        createdAt: 0,
+      });
+      return [...TASK_GROUPS];
+    case "rename_task_group": {
+      const { groupId, name } = (args ?? {}) as { groupId?: number; name?: string };
+      const group = TASK_GROUPS.find((candidate) => candidate.id === groupId);
+      if (group && name) group.name = name;
+      return [...TASK_GROUPS];
+    }
+    case "delete_task_group": {
+      const { groupId } = (args ?? {}) as { groupId?: number };
+      const index = TASK_GROUPS.findIndex((candidate) => candidate.id === groupId);
+      if (index >= 0) TASK_GROUPS.splice(index, 1);
+      for (const task of TASKS) if (task.groupId === groupId) task.groupId = null;
+      return [...TASK_GROUPS];
+    }
+    case "reorder_task_groups":
+      return [...TASK_GROUPS];
+    // `?pending=context` stands in for a window told where to go before it had
+    // finished starting up.
+    case "take_pending_view":
+      return new URLSearchParams(location.search).get("pending");
+    case "context_selection":
+      return TASKS.slice(1, 4).map((task) => task.id);
+    case "open_context_window":
+      return undefined;
+    // Walks through a few steps first, the way a real read does.
+    case "brief_tasks": {
+      const walked = [
+        { id: "s1", label: "Reading serializers.py" },
+        { id: "s2", label: "Searching for project_number" },
+        { id: "s3", label: "Reading ProjectForm.vue" },
+      ];
+      for (const step of walked) {
+        emit("brief:step", { ...step, done: false });
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        emit("brief:step", { id: step.id, done: true });
+      }
+      return "The three tasks add up to one change: carrying a project number \
+through the stack, from the serializer out to the two places the front end \
+shows it.\n\nStart in the back end — the field and the serializer are what the \
+front end reads — then the input on the project screen, then the read-only line \
+on the detail screen.\n\nThe serializer is shared with the export path, so a \
+required field there will break exports for older records.";
+    }
+    case "list_tags":
+      return [...TAGS];
+    case "create_tag":
+      TAGS.push({
+        id: TAGS.length + 1,
+        slug: String((args as { label?: string })?.label ?? "tag").toLowerCase(),
+        label: String((args as { label?: string })?.label ?? "Tag"),
+        color: String((args as { color?: string })?.color ?? "#4a9bf5"),
+        position: TAGS.length,
+      });
+      return [...TAGS];
+    case "update_tag": {
+      const { tagId, patch } = (args ?? {}) as { tagId?: number; patch?: Record<string, string> };
+      const tag = TAGS.find((candidate) => candidate.id === tagId);
+      if (tag) Object.assign(tag, patch ?? {});
+      return [...TAGS];
+    }
+    case "delete_tag": {
+      const { tagId } = (args ?? {}) as { tagId?: number };
+      const index = TAGS.findIndex((candidate) => candidate.id === tagId);
+      const [gone] = index >= 0 ? TAGS.splice(index, 1) : [];
+      if (gone) {
+        for (const task of TASKS) {
+          task.tags = task.tags.filter((slug: string) => slug !== gone.slug);
+        }
+      }
+      return [...TAGS];
+    }
+    case "reorder_tags":
+      return [...TAGS];
     case "list_categories":
       return CATEGORIES;
     case "suggest_criteria":

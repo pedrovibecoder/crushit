@@ -69,3 +69,14 @@ export function dayName(day: string, today = localDay()): string {
     month: "short",
   });
 }
+
+/**
+ * Task titles, A to Z. Numbers in a title sort as numbers, so `[FE] 2` comes
+ * before `[FE] 10` rather than after it, and case is not a sorting question.
+ */
+export function byTitle(a: { title: string }, b: { title: string }): number {
+  return a.title.localeCompare(b.title, undefined, {
+    numeric: true,
+    sensitivity: "base",
+  });
+}

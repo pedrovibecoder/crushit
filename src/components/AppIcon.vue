@@ -20,6 +20,8 @@ const PATHS: Record<string, string> = {
   refresh: "M20 12a8 8 0 11-2.34-5.66M20 4v4.5h-4.5",
   message: "M20 12.5a7.5 7.5 0 01-7.5 7.5H8l-4 3v-4.2A7.5 7.5 0 0112.5 5h0A7.5 7.5 0 0120 12.5z",
   moon: "M20.5 14.8A8.6 8.6 0 019.2 3.5a8.6 8.6 0 1011.3 11.3z",
+  /* Work stacked up for later: the plan screen. */
+  stack: "M12 4.5l7.5 4-7.5 4-7.5-4zM4.5 12.5l7.5 4 7.5-4M4.5 16.5l7.5 4 7.5-4",
   calendar: "M4.5 7.5A1.5 1.5 0 016 6h12a1.5 1.5 0 011.5 1.5v11A1.5 1.5 0 0118 20H6a1.5 1.5 0 01-1.5-1.5zM4.5 10h15M8.5 4v3m7-3v3",
   /* The same calendar with the day marked, for going back to it. */
   today: "M4.5 7.5A1.5 1.5 0 016 6h12a1.5 1.5 0 011.5 1.5v11A1.5 1.5 0 0118 20H6a1.5 1.5 0 01-1.5-1.5zM4.5 10h15M8.5 4v3m7-3v3M12 14.75h.01",

@@ -1,7 +1,8 @@
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { errorMessage, ipc } from "../lib/ipc";
-import type { NewTask, Task, TaskPatch, TaskStatus } from "../types";
+import { localDay } from "../lib/format";
+import type { DayMark, NewTask, Task, TaskPatch, TaskStatus } from "../types";
 
 const OPEN_STATUSES: TaskStatus[] = [
   "ready",
@@ -58,6 +59,31 @@ export const useTasksStore = defineStore("tasks", () => {
       if (task.status === "completed") done += points;
     }
     return { done, total, ratio: total === 0 ? 0 : done / total };
+  });
+
+  /**
+   * What each day holds, keyed by `YYYY-MM-DD`, for the calendars to mark the
+   * days worth opening. A task counts on the day it was planned for and on the
+   * day it was finished, which are usually the same day and occasionally are
+   * not. Days it was merely carried through are left unmarked: carry-over
+   * would otherwise smear one unfinished task across every date after it.
+   */
+  const dayMarks = computed(() => {
+    const marks: Record<string, DayMark> = {};
+    const note = (day: string, done: boolean) => {
+      const mark = (marks[day] ??= { total: 0, done: 0 });
+      mark.total += 1;
+      if (done) mark.done += 1;
+    };
+    for (const task of tasks.value) {
+      const done = task.status === "completed";
+      // Undated work is not on the calendar yet, so it marks no day.
+      if (task.plannedFor !== null) note(task.plannedFor, done);
+      const finished =
+        task.completedAt !== null ? localDay(new Date(task.completedAt * 1000)) : null;
+      if (finished && finished !== task.plannedFor) note(finished, done);
+    }
+    return marks;
   });
 
   /** What is being worked on right now, agent or not. */
@@ -159,6 +185,7 @@ export const useTasksStore = defineStore("tasks", () => {
 
   return {
     tasks,
+    dayMarks,
     deletingId,
     error,
     celebration,

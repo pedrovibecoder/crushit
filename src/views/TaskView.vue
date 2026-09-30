@@ -2,7 +2,7 @@
 import { computed, nextTick, ref, watch } from "vue";
 import AppIcon from "../components/AppIcon.vue";
 import PanelHeader from "../components/PanelHeader.vue";
-import SelectMenu from "../components/SelectMenu.vue";
+import SelectMenu, { type SelectOption } from "../components/SelectMenu.vue";
 import { formatClock, formatSpan } from "../lib/format";
 import { errorMessage, ipc } from "../lib/ipc";
 import { useAppStore } from "../stores/app";
@@ -10,11 +10,28 @@ import { useFocusStore } from "../stores/focus";
 import { useTasksStore } from "../stores/tasks";
 import { useAgentStore } from "../stores/agent";
 import { useCategoriesStore } from "../stores/categories";
-import { STORY_POINTS, STATUS_LABELS, type TaskCategory } from "../types";
+import { useGroupsStore } from "../stores/groups";
+import { useTagsStore } from "../stores/tags";
+import { STORY_POINTS, STATUS_LABELS, type Task, type TaskCategory } from "../types";
 
 const app = useAppStore();
 const categories = useCategoriesStore();
+const groups = useGroupsStore();
+const tags = useTagsStore();
 const agents = useAgentStore();
+
+/** Tags are a set: picking one that is already on the task takes it off. */
+function toggleTag(task: Task, slug: string) {
+  const next = task.tags.includes(slug)
+    ? task.tags.filter((other) => other !== slug)
+    : [...task.tags, slug];
+  return tasks.update(task.id, { tags: next });
+}
+
+const groupOptions = computed<SelectOption[]>(() => [
+  { value: "", label: "No group" },
+  ...groups.groups.map((group) => ({ value: String(group.id), label: group.name })),
+]);
 
 const categoryOptions = computed(() =>
   categories.categories.map((category) => ({
@@ -396,6 +413,42 @@ async function destroy() {
             aria-label="Estimate in minutes"
             class="field tnum w-16 px-2 py-1.5 text-[11.5px]"
             @change="tasks.update(task.id, { estimateMinutes: Number(($event.target as HTMLInputElement).value) })"
+          />
+        </div>
+        <!-- Several at once, unlike the category: a task can be front-end
+             work and devops work at the same time. -->
+        <div v-if="tags.tags.length" class="mt-1.5 flex flex-wrap items-center gap-1">
+          <button
+            v-for="tag in tags.tags"
+            :key="tag.id"
+            class="chip font-semibold transition-colors"
+            :style="
+              task.tags.includes(tag.slug)
+                ? {
+                    color: tag.color,
+                    borderColor: `color-mix(in oklab, ${tag.color} 45%, transparent)`,
+                    backgroundColor: `color-mix(in oklab, ${tag.color} 14%, transparent)`,
+                  }
+                : {}
+            "
+            :class="!task.tags.includes(tag.slug) && 'text-ink-3 hover:bg-line-soft'"
+            :aria-pressed="task.tags.includes(tag.slug)"
+            @click="toggleTag(task, tag.slug)"
+          >
+            {{ tag.label }}
+          </button>
+        </div>
+
+        <!-- Which bucket the task waits in. Its day is set where days are
+             chosen — on Today, or on the plan screen. -->
+        <div class="mt-1.5">
+          <SelectMenu
+            :model-value="task.groupId === null ? '' : String(task.groupId)"
+            :options="groupOptions"
+            label="Group"
+            @update:model-value="
+              tasks.update(task.id, { groupId: $event === '' ? null : Number($event) })
+            "
           />
         </div>
         <div class="mt-1.5 flex items-center gap-1.5">

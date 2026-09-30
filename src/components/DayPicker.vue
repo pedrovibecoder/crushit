@@ -2,27 +2,27 @@
 import { computed, onMounted, ref, watch } from "vue";
 import AppIcon from "./AppIcon.vue";
 import { localDay, shiftDay } from "../lib/format";
-
-/** What a day looks like from the list's point of view: how much, how far. */
-export interface DayMark {
-  total: number;
-  done: number;
-}
+import { onPressOutside } from "../lib/dismiss";
+import type { DayMark } from "../types";
 
 const props = withDefaults(
   defineProps<{
-    /** The day being read, as `YYYY-MM-DD`. */
-    modelValue: string;
+    /** The day being read, as `YYYY-MM-DD`, or nothing for undated work. */
+    modelValue: string | null;
     /** Which day counts as today, so the grid can point at it. */
     today?: string;
     /** Work per day, keyed by `YYYY-MM-DD`, used for the dots under a date. */
     marks?: Record<string, DayMark>;
+    /** Offers a way back out of having a day at all. */
+    clearable?: boolean;
   }>(),
   { marks: () => ({}) },
 );
 
 const emit = defineEmits<{
   (event: "update:modelValue", day: string): void;
+  /** Only offered when `clearable`: the work goes back to having no day. */
+  (event: "clear"): void;
   (event: "close"): void;
 }>();
 
@@ -35,10 +35,10 @@ const today = computed(() => props.today ?? localDay());
  * somewhere else, but paging through months on its own does not move the day:
  * looking ahead is not the same as going there.
  */
-const cursor = ref(props.modelValue.slice(0, 7));
+const cursor = ref((props.modelValue ?? today.value).slice(0, 7));
 watch(
   () => props.modelValue,
-  (day) => { cursor.value = day.slice(0, 7) },
+  (day) => { cursor.value = (day ?? today.value).slice(0, 7) },
 );
 
 /** Noon, so a shift across a daylight-saving boundary stays on its date. */
@@ -112,11 +112,13 @@ function onKey(event: KeyboardEvent) {
   const by = steps[event.key];
   if (by === undefined) return;
   event.preventDefault();
-  emit("update:modelValue", shiftDay(props.modelValue, by));
+  emit("update:modelValue", shiftDay(props.modelValue ?? today.value, by));
 }
 
 /** Opened by a click on the date, so the grid takes focus to hear the arrows. */
 onMounted(() => root.value?.focus());
+
+onPressOutside(root, () => emit("close"));
 </script>
 
 <template>
@@ -196,6 +198,13 @@ onMounted(() => root.value?.focus());
         @click="pick(today)"
       >
         Today
+      </button>
+      <button
+        v-if="clearable"
+        class="flex-1 rounded-[8px] py-1 text-[11px] font-semibold text-ink-2 transition-colors hover:bg-line-soft"
+        @click="emit('clear'); emit('close')"
+      >
+        No date
       </button>
       <button
         class="flex-1 rounded-[8px] py-1 text-[11px] font-semibold text-ink-2 transition-colors hover:bg-line-soft"

@@ -5,6 +5,8 @@ import { errorMessage, ipc } from "../lib/ipc";
 import type { Project, Settings, SettingsPatch } from "../types";
 import { useAgentStore } from "./agent";
 import { useCategoriesStore } from "./categories";
+import { useGroupsStore } from "./groups";
+import { useTagsStore } from "./tags";
 import { useExecutionStore } from "./execution";
 import { useFocusStore } from "./focus";
 import { useRestStore } from "./rest";
@@ -13,6 +15,8 @@ import { useTasksStore } from "./tasks";
 
 export type View =
   | "today"
+  | "plan"
+  | "context"
   | "task"
   | "projects"
   | "goal"
@@ -83,6 +87,8 @@ export const useAppStore = defineStore("app", () => {
       activeProject.value = data.activeProject;
       tasks.set(data.tasks);
       useCategoriesStore().set(data.categories);
+      useTagsStore().set(data.tags);
+      useGroupsStore().set(data.taskGroups);
       focus.set(data.focus);
       useRestStore().set(data.rest);
       const codex = useAgentStore();
@@ -119,10 +125,12 @@ export const useAppStore = defineStore("app", () => {
     const stopExecution = await useExecutionStore().subscribe();
     const stopReview = await useReviewStore().subscribe();
     const stopCategories = await useCategoriesStore().subscribe();
+    const stopTags = await useTagsStore().subscribe();
     const stopRest = await useRestStore().subscribe();
     return () => {
       stopTasks();
       stopCategories();
+      stopTags();
       stopRest();
       stopFocus();
       stopCodex();
@@ -139,6 +147,7 @@ export const useAppStore = defineStore("app", () => {
       activeProject.value =
         projects.value.find((project) => project.id === projectId) ?? null;
       await tasks.load(projectId);
+      await useGroupsStore().load(projectId);
       await useAgentStore().refreshGoal(projectId);
       view.value = projectId === null ? "projects" : "today";
     } catch (caught) {

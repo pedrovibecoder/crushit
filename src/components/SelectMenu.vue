@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import AppIcon from "./AppIcon.vue";
+import { onPressOutside } from "../lib/dismiss";
 
 export interface SelectOption {
   value: string;
@@ -19,6 +20,10 @@ const emit = defineEmits<{ (event: "update:modelValue", value: string): void }>(
 
 const open = ref(false);
 
+/** The whole control, so pressing its own button is not "outside". */
+const root = ref<HTMLElement | null>(null);
+onPressOutside(root, () => { open.value = false });
+
 const current = computed(
   () => props.options.find((option) => option.value === props.modelValue),
 );
@@ -34,7 +39,7 @@ function pick(value: string) {
     The list expands inline rather than floating: the popup window is sized to
     its content and clips overflow, so an absolute overlay would be cut off.
   -->
-  <div>
+  <div ref="root">
     <button
       type="button"
       class="field flex w-full items-center gap-2 px-2 py-1.5 text-left"

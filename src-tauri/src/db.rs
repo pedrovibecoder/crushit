@@ -173,6 +173,44 @@ UPDATE tasks SET planned_for = date(created_at, 'unixepoch', 'localtime');
 "#;
 
 /// Migrations are applied in order; `user_version` records how many have run.
+/// Tasks planned for later needed somewhere to belong other than a day. A
+/// group is a name and nothing more: no dates of its own, so a task keeps the
+/// day it sits on and a group can span whatever stretch of time it needs.
+const ADD_TASK_GROUPS: &str = r#"
+CREATE TABLE task_groups (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  position   INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX idx_task_groups_project ON task_groups(project_id, position);
+ALTER TABLE tasks ADD COLUMN group_id INTEGER REFERENCES task_groups(id) ON DELETE SET NULL;
+"#;
+
+/// A second axis on a task, beside the category it is filed under: which part
+/// of the work it touches. A task is one kind of thing — a task, a bug — but it
+/// can easily be both front-end and devops, so these are many to a task.
+const ADD_TAGS: &str = r#"
+CREATE TABLE tags (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  slug     TEXT NOT NULL UNIQUE,
+  label    TEXT NOT NULL,
+  color    TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE task_tags (
+  task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  tag_id  INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+  PRIMARY KEY (task_id, tag_id)
+);
+CREATE INDEX idx_task_tags_tag ON task_tags(tag_id);
+INSERT INTO tags (slug, label, color, position) VALUES
+  ('fe', 'FE', '#4a9bf5', 0),
+  ('be', 'BE', '#7b61ff', 1),
+  ('devops', 'Devops', '#3fbf6a', 2);
+"#;
+
 const MIGRATIONS: &[&str] = &[
     SCHEMA,
     ADD_GOAL_PLANNING,
@@ -181,6 +219,8 @@ const MIGRATIONS: &[&str] = &[
     ADD_CATEGORIES,
     ADD_STORY_POINTS,
     ADD_PLANNED_FOR,
+    ADD_TASK_GROUPS,
+    ADD_TAGS,
 ];
 
 fn migrate(conn: &Connection) -> Result<()> {
@@ -431,6 +471,19 @@ fn files_for(conn: &Connection, task_id: i64) -> Result<Vec<String>> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+/// The task's tags as slugs, in the order the tags themselves are shown, so a
+/// row of chips reads the same way everywhere.
+fn tags_for(conn: &Connection, task_id: i64) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT tags.slug FROM task_tags
+           JOIN tags ON tags.id = task_tags.tag_id
+          WHERE task_tags.task_id = ?1
+          ORDER BY tags.position, tags.id",
+    )?;
+    let rows = stmt.query_map([task_id], |row| row.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 fn dependencies_for(conn: &Connection, task_id: i64) -> Result<Vec<i64>> {
     let mut stmt = conn.prepare(
         "SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?1 ORDER BY depends_on_task_id",
@@ -456,6 +509,7 @@ fn task_from_row(conn: &Connection, row: &Row) -> Result<Task> {
         id,
         project_id: row.get("project_id")?,
         goal_id: row.get("goal_id")?,
+        group_id: row.get("group_id")?,
         title: row.get("title")?,
         description: row.get("description")?,
         category: row.get("category")?,
@@ -463,18 +517,211 @@ fn task_from_row(conn: &Connection, row: &Row) -> Result<Task> {
         position: row.get("position")?,
         estimate_minutes: row.get("estimate_minutes")?,
         story_points: row.get("story_points")?,
-        planned_for: row.get("planned_for")?,
+        planned_for: Some(row.get::<_, String>("planned_for")?).filter(|day| !day.is_empty()),
         is_ai_generated: row.get::<_, i64>("is_ai_generated")? != 0,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
         completed_at: row.get("completed_at")?,
         criteria: criteria_for(conn, id)?,
         files: files_for(conn, id)?,
+        tags: tags_for(conn, id)?,
         depends_on: dependencies_for(conn, id)?,
         focus_seconds: summary.0,
         focus_sessions: summary.1,
     })
 }
+
+// --------------------------------------------------------------------- tags
+
+fn tag_from_row(row: &Row) -> rusqlite::Result<Tag> {
+    Ok(Tag {
+        id: row.get("id")?,
+        slug: row.get("slug")?,
+        label: row.get("label")?,
+        color: row.get("color")?,
+        position: row.get("position")?,
+    })
+}
+
+pub fn list_tags(conn: &Connection) -> Result<Vec<Tag>> {
+    let mut stmt = conn.prepare("SELECT * FROM tags ORDER BY position, id")?;
+    let rows = stmt.query_map([], tag_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+fn find_tag(conn: &Connection, id: i64) -> Result<Option<Tag>> {
+    Ok(conn
+        .query_row("SELECT * FROM tags WHERE id = ?1", [id], tag_from_row)
+        .optional()?)
+}
+
+pub fn create_tag(conn: &Connection, label: &str, color: &str) -> Result<Tag> {
+    let label = label.trim();
+    if label.is_empty() {
+        return Err(crate::error::Error::invalid("a tag needs a name"));
+    }
+    let slug = slugify(label);
+    if slug.is_empty() {
+        return Err(crate::error::Error::invalid(
+            "that name has no letters or numbers in it",
+        ));
+    }
+    let taken: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tags WHERE slug = ?1)",
+        [&slug],
+        |row| Ok(row.get::<_, i64>(0)? != 0),
+    )?;
+    if taken {
+        return Err(crate::error::Error::invalid(format!(
+            "there is already a tag called {label}"
+        )));
+    }
+    let next_position: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM tags",
+        [],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO tags (slug, label, color, position) VALUES (?1, ?2, ?3, ?4)",
+        params![slug, label, color.trim(), next_position],
+    )?;
+    find_tag(conn, conn.last_insert_rowid())?.ok_or(crate::error::Error::NotFound("tag"))
+}
+
+/// The slug is never patched: tasks point at it, so renaming a tag keeps every
+/// task that was tagged with it.
+pub fn update_tag(conn: &Connection, id: i64, patch: &TagPatch) -> Result<Tag> {
+    if find_tag(conn, id)?.is_none() {
+        return Err(crate::error::Error::NotFound("tag"));
+    }
+    if let Some(label) = &patch.label {
+        let label = label.trim();
+        if label.is_empty() {
+            return Err(crate::error::Error::invalid("a tag needs a name"));
+        }
+        conn.execute("UPDATE tags SET label = ?2 WHERE id = ?1", params![id, label])?;
+    }
+    if let Some(color) = &patch.color {
+        conn.execute(
+            "UPDATE tags SET color = ?2 WHERE id = ?1",
+            params![id, color.trim()],
+        )?;
+    }
+    find_tag(conn, id)?.ok_or(crate::error::Error::NotFound("tag"))
+}
+
+/// Deleting a tag unfiles it from every task and leaves the tasks alone. Unlike
+/// a category there is nothing to fall back to: a task with no tags is fine.
+pub fn delete_tag(conn: &Connection, id: i64) -> Result<Vec<Tag>> {
+    if find_tag(conn, id)?.is_none() {
+        return Err(crate::error::Error::NotFound("tag"));
+    }
+    conn.execute("DELETE FROM task_tags WHERE tag_id = ?1", [id])?;
+    conn.execute("DELETE FROM tags WHERE id = ?1", [id])?;
+    list_tags(conn)
+}
+
+pub fn reorder_tags(conn: &Connection, ordered_ids: &[i64]) -> Result<Vec<Tag>> {
+    for (index, id) in ordered_ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE tags SET position = ?2 WHERE id = ?1",
+            params![id, index as i64],
+        )?;
+    }
+    list_tags(conn)
+}
+
+// ------------------------------------------------------------- task groups
+
+fn task_group_from_row(row: &Row) -> rusqlite::Result<TaskGroup> {
+    Ok(TaskGroup {
+        id: row.get("id")?,
+        project_id: row.get("project_id")?,
+        name: row.get("name")?,
+        position: row.get("position")?,
+        created_at: row.get("created_at")?,
+    })
+}
+
+pub fn list_task_groups(conn: &Connection, project_id: i64) -> Result<Vec<TaskGroup>> {
+    let mut stmt = conn
+        .prepare("SELECT * FROM task_groups WHERE project_id = ?1 ORDER BY position, id")?;
+    let rows = stmt.query_map([project_id], task_group_from_row)?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+pub fn create_task_group(conn: &Connection, project_id: i64, name: &str) -> Result<TaskGroup> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(crate::error::Error::invalid("a group needs a name"));
+    }
+    let next_position: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM task_groups WHERE project_id = ?1",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    conn.execute(
+        "INSERT INTO task_groups (project_id, name, position, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![project_id, name, next_position, now()],
+    )?;
+    get_task_group(conn, conn.last_insert_rowid())
+}
+
+pub fn get_task_group(conn: &Connection, id: i64) -> Result<TaskGroup> {
+    Ok(conn
+        .query_row("SELECT * FROM task_groups WHERE id = ?1", [id], task_group_from_row)
+        .optional()?
+        .ok_or(crate::error::Error::NotFound("group"))?)
+}
+
+pub fn rename_task_group(conn: &Connection, id: i64, name: &str) -> Result<TaskGroup> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(crate::error::Error::invalid("a group needs a name"));
+    }
+    conn.execute(
+        "UPDATE task_groups SET name = ?2 WHERE id = ?1",
+        params![id, name],
+    )?;
+    get_task_group(conn, id)
+}
+
+/// The tasks in a deleted group are not deleted with it — they come out of the
+/// group and stay on the days they were planned for. Losing a bucket should
+/// never lose the work that was in it.
+pub fn delete_task_group(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute("UPDATE tasks SET group_id = NULL WHERE group_id = ?1", [id])?;
+    conn.execute("DELETE FROM task_groups WHERE id = ?1", [id])?;
+    Ok(())
+}
+
+pub fn reorder_task_groups(conn: &Connection, project_id: i64, ordered_ids: &[i64]) -> Result<()> {
+    for (index, id) in ordered_ids.iter().enumerate() {
+        conn.execute(
+            "UPDATE task_groups SET position = ?3 WHERE id = ?1 AND project_id = ?2",
+            params![id, project_id, index as i64],
+        )?;
+    }
+    Ok(())
+}
+
+/// A group from another project would file the task somewhere its own project
+/// cannot see it, so it is refused rather than quietly dropped.
+fn resolve_group(conn: &Connection, project_id: i64, group_id: Option<i64>) -> Result<Option<i64>> {
+    let Some(group_id) = group_id else {
+        return Ok(None);
+    };
+    let group = get_task_group(conn, group_id)?;
+    if group.project_id != project_id {
+        return Err(crate::error::Error::invalid(
+            "that group belongs to another project",
+        ));
+    }
+    Ok(Some(group_id))
+}
+
+// -------------------------------------------------------------------- tasks
 
 pub fn list_tasks(conn: &Connection, project_id: i64) -> Result<Vec<Task>> {
     let mut stmt =
@@ -532,6 +779,20 @@ fn replace_files(conn: &Connection, task_id: i64, paths: &[String]) -> Result<()
     Ok(())
 }
 
+/// Slugs that no longer name a tag are dropped rather than failing the write:
+/// a stale screen holding a deleted tag should not be able to refuse an edit.
+fn replace_tags(conn: &Connection, task_id: i64, slugs: &[String]) -> Result<()> {
+    conn.execute("DELETE FROM task_tags WHERE task_id = ?1", [task_id])?;
+    for slug in slugs {
+        conn.execute(
+            "INSERT OR IGNORE INTO task_tags (task_id, tag_id)
+             SELECT ?1, id FROM tags WHERE slug = ?2",
+            params![task_id, slug.trim()],
+        )?;
+    }
+    Ok(())
+}
+
 fn replace_dependencies(conn: &Connection, task_id: i64, depends_on: &[i64]) -> Result<()> {
     conn.execute("DELETE FROM task_dependencies WHERE task_id = ?1", [task_id])?;
     for other in depends_on {
@@ -553,17 +814,27 @@ pub fn today(conn: &Connection) -> Result<String> {
 
 /// A day to file a task under. Anything that is not a plain date falls back to
 /// today rather than being stored and later failing to match anything.
-fn planned_day(conn: &Connection, raw: Option<&str>) -> Result<String> {
+/// The day a task is filed under, when it has one.
+///
+/// A task may be planned long before it is scheduled, so "no day" is a real
+/// answer rather than a missing one — and anything that is not a `YYYY-MM-DD`
+/// date reads as no day rather than being guessed at. The column itself is
+/// `NOT NULL`, so an empty string is what "no day" looks like in the table.
+fn planned_day(raw: Option<&str>) -> Option<String> {
     let looks_like_a_date = |day: &str| {
         day.len() == 10
             && day.as_bytes()[4] == b'-'
             && day.as_bytes()[7] == b'-'
             && day.chars().filter(char::is_ascii_digit).count() == 8
     };
-    match raw.map(str::trim).filter(|day| looks_like_a_date(day)) {
-        Some(day) => Ok(day.to_string()),
-        None => today(conn),
-    }
+    raw.map(str::trim)
+        .filter(|day| looks_like_a_date(day))
+        .map(str::to_string)
+}
+
+/// How a day is stored: the empty string stands for a task with no day yet.
+fn stored_day(day: Option<String>) -> String {
+    day.unwrap_or_default()
 }
 
 pub fn create_task(conn: &Connection, input: &NewTask) -> Result<Task> {
@@ -579,10 +850,10 @@ pub fn create_task(conn: &Connection, input: &NewTask) -> Result<Task> {
     )?;
     conn.execute(
         "INSERT INTO tasks
-           (project_id, goal_id, title, description, category, status, position,
+           (project_id, goal_id, group_id, title, description, category, status, position,
             estimate_minutes, story_points, is_ai_generated, planned_for,
             created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
+         VALUES (?1, ?2, ?13, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)",
         params![
             input.project_id,
             input.goal_id,
@@ -594,8 +865,9 @@ pub fn create_task(conn: &Connection, input: &NewTask) -> Result<Task> {
             input.estimate_minutes,
             input.story_points.and_then(nearest_story_points),
             input.is_ai_generated.unwrap_or(false) as i64,
-            planned_day(conn, input.planned_for.as_deref())?,
+            stored_day(planned_day(input.planned_for.as_deref())),
             ts,
+            resolve_group(conn, input.project_id, input.group_id)?,
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -604,6 +876,9 @@ pub fn create_task(conn: &Connection, input: &NewTask) -> Result<Task> {
     }
     if let Some(files) = &input.files {
         replace_files(conn, id, files)?;
+    }
+    if let Some(tags) = &input.tags {
+        replace_tags(conn, id, tags)?;
     }
     get_task(conn, id)
 }
@@ -652,9 +927,17 @@ pub fn update_task(conn: &Connection, id: i64, patch: &TaskPatch) -> Result<Task
         )?;
     }
     if let Some(day) = &patch.planned_for {
+        // `Some(None)` is a task being taken off its day and put back into the
+        // plan; `Some(Some(day))` is one being scheduled.
         conn.execute(
             "UPDATE tasks SET planned_for = ?2 WHERE id = ?1",
-            params![id, planned_day(conn, Some(day))?],
+            params![id, stored_day(planned_day(day.as_deref()))],
+        )?;
+    }
+    if let Some(group_id) = patch.group_id {
+        conn.execute(
+            "UPDATE tasks SET group_id = ?2 WHERE id = ?1",
+            params![id, resolve_group(conn, existing.project_id, group_id)?],
         )?;
     }
     if let Some(points) = patch.story_points {
@@ -668,6 +951,9 @@ pub fn update_task(conn: &Connection, id: i64, patch: &TaskPatch) -> Result<Task
     }
     if let Some(files) = &patch.files {
         replace_files(conn, id, files)?;
+    }
+    if let Some(tags) = &patch.tags {
+        replace_tags(conn, id, tags)?;
     }
     if let Some(depends_on) = &patch.depends_on {
         replace_dependencies(conn, id, depends_on)?;
@@ -956,6 +1242,8 @@ pub fn create_tasks_from_plan(conn: &Connection, goal: &Goal) -> Result<Vec<Task
             &NewTask {
                 project_id: goal.project_id,
                 goal_id: Some(goal.id),
+                // A plan's tasks are for today; filing them is a later choice.
+                group_id: None,
                 title: planned.title.clone(),
                 description: (!planned.description.is_empty())
                     .then(|| planned.description.clone()),
@@ -965,8 +1253,10 @@ pub fn create_tasks_from_plan(conn: &Connection, goal: &Goal) -> Result<Vec<Task
                     .then_some(planned.estimate_minutes),
                 story_points: (planned.story_points > 0).then_some(planned.story_points),
                 // An accepted plan is work for today; it can be moved after.
-                planned_for: None,
+                planned_for: Some(today(conn)?),
                 is_ai_generated: Some(true),
+                // The agent does not pick tags; they are the developer's axis.
+                tags: None,
                 criteria: Some(planned.acceptance_criteria.clone()),
                 files: Some(planned.relevant_files.clone()),
             },
@@ -1295,6 +1585,317 @@ mod tests {
     }
 
     #[test]
+    fn a_fresh_database_starts_with_the_three_usual_tags() {
+        let conn = memory_db();
+        let labels: Vec<String> = list_tags(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|tag| tag.label)
+            .collect();
+        assert_eq!(labels, vec!["FE", "BE", "Devops"]);
+    }
+
+    #[test]
+    fn a_task_can_carry_several_tags_and_have_them_replaced() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                title: "Add the project number".into(),
+                tags: Some(vec!["fe".into(), "devops".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Shown in the tags' own order, not the order they were given in.
+        assert_eq!(task.tags, vec!["fe", "devops"]);
+
+        let retagged = update_task(
+            &conn,
+            task.id,
+            &TaskPatch { tags: Some(vec!["be".into()]), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(retagged.tags, vec!["be"]);
+
+        let untagged = update_task(
+            &conn,
+            task.id,
+            &TaskPatch { tags: Some(vec![]), ..Default::default() },
+        )
+        .unwrap();
+        assert!(untagged.tags.is_empty());
+    }
+
+    #[test]
+    fn a_patch_that_says_nothing_about_tags_leaves_them_alone() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                title: "Add the project number".into(),
+                tags: Some(vec!["fe".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let renamed = update_task(
+            &conn,
+            task.id,
+            &TaskPatch { title: Some("Add the number".into()), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(renamed.tags, vec!["fe"]);
+    }
+
+    #[test]
+    fn a_slug_that_names_no_tag_is_dropped_rather_than_refused() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                title: "Add the project number".into(),
+                tags: Some(vec!["fe".into(), "gone".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(task.tags, vec!["fe"]);
+    }
+
+    #[test]
+    fn a_tag_is_named_once_and_renamed_without_losing_its_tasks() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let tag = create_tag(&conn, "  Infra  ", "#3fbf6a").unwrap();
+        assert_eq!(tag.slug, "infra");
+        assert!(create_tag(&conn, "infra", "#000000").is_err(), "the slug is taken");
+        assert!(create_tag(&conn, "   ", "#000000").is_err());
+
+        let task = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                title: "Move the runner".into(),
+                tags: Some(vec!["infra".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        update_tag(
+            &conn,
+            tag.id,
+            &TagPatch { label: Some("Platform".into()), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(get_task(&conn, task.id).unwrap().tags, vec!["infra"]);
+    }
+
+    #[test]
+    fn deleting_a_tag_unfiles_it_and_keeps_the_tasks() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                title: "Add the project number".into(),
+                tags: Some(vec!["fe".into(), "be".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let fe = list_tags(&conn).unwrap().into_iter().find(|tag| tag.slug == "fe").unwrap();
+        let left = delete_tag(&conn, fe.id).unwrap();
+        assert_eq!(left.len(), 2);
+
+        let survivor = get_task(&conn, task.id).unwrap();
+        assert_eq!(survivor.tags, vec!["be"]);
+        assert_eq!(survivor.title, "Add the project number");
+    }
+
+    #[test]
+    fn tags_are_shown_in_the_order_they_are_put_in() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let all = list_tags(&conn).unwrap();
+        let ids: Vec<i64> = vec![all[2].id, all[0].id, all[1].id];
+        reorder_tags(&conn, &ids).unwrap();
+
+        let task = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                title: "Everything".into(),
+                tags: Some(vec!["fe".into(), "be".into(), "devops".into()]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(task.tags, vec!["devops", "fe", "be"]);
+    }
+
+    #[test]
+    fn a_group_holds_tasks_without_owning_their_days() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let group = create_task_group(&conn, project.id, "  Sprint 12  ").unwrap();
+        assert_eq!(group.name, "Sprint 12");
+
+        let task = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                group_id: Some(group.id),
+                title: "Wire the permission key".into(),
+                planned_for: Some("2026-09-01".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(task.group_id, Some(group.id));
+        assert_eq!(task.planned_for.as_deref(), Some("2026-09-01"));
+    }
+
+    #[test]
+    fn a_group_needs_a_name() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        assert!(create_task_group(&conn, project.id, "   ").is_err());
+        let group = create_task_group(&conn, project.id, "Sprint").unwrap();
+        assert!(rename_task_group(&conn, group.id, "").is_err());
+    }
+
+    #[test]
+    fn a_task_can_be_moved_between_groups_and_out_of_one() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let first = create_task_group(&conn, project.id, "Sprint 12").unwrap();
+        let second = create_task_group(&conn, project.id, "Later").unwrap();
+        let task = a_task(&conn, project.id, "Audit i18n");
+
+        let filed = update_task(
+            &conn,
+            task.id,
+            &TaskPatch { group_id: Some(Some(first.id)), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(filed.group_id, Some(first.id));
+
+        let moved = update_task(
+            &conn,
+            task.id,
+            &TaskPatch { group_id: Some(Some(second.id)), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(moved.group_id, Some(second.id));
+
+        let loose = update_task(
+            &conn,
+            task.id,
+            &TaskPatch { group_id: Some(None), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(loose.group_id, None);
+    }
+
+    #[test]
+    fn a_patch_that_says_nothing_about_the_group_leaves_it_alone() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let group = create_task_group(&conn, project.id, "Sprint 12").unwrap();
+        let task = a_task(&conn, project.id, "Audit i18n");
+        update_task(
+            &conn,
+            task.id,
+            &TaskPatch { group_id: Some(Some(group.id)), ..Default::default() },
+        )
+        .unwrap();
+
+        let renamed = update_task(
+            &conn,
+            task.id,
+            &TaskPatch { title: Some("Audit i18n coverage".into()), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(renamed.group_id, Some(group.id));
+    }
+
+    #[test]
+    fn deleting_a_group_keeps_the_work_that_was_in_it() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let group = create_task_group(&conn, project.id, "Sprint 12").unwrap();
+        let task = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                group_id: Some(group.id),
+                title: "Wire the permission key".into(),
+                planned_for: Some("2026-09-01".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        delete_task_group(&conn, group.id).unwrap();
+
+        let survivor = get_task(&conn, task.id).unwrap();
+        assert_eq!(survivor.group_id, None);
+        assert_eq!(survivor.planned_for.as_deref(), Some("2026-09-01"));
+        assert!(list_task_groups(&conn, project.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_group_from_another_project_is_refused() {
+        let conn = memory_db();
+        let mine = a_project(&conn);
+        let theirs = upsert_project(&conn, "/tmp/other", "other", true, None).unwrap();
+        let elsewhere = create_task_group(&conn, theirs.id, "Their sprint").unwrap();
+
+        let refused = create_task(
+            &conn,
+            &NewTask {
+                project_id: mine.id,
+                group_id: Some(elsewhere.id),
+                title: "Wire the permission key".into(),
+                ..Default::default()
+            },
+        );
+        assert!(refused.is_err());
+
+        let task = a_task(&conn, mine.id, "Audit i18n");
+        assert!(update_task(
+            &conn,
+            task.id,
+            &TaskPatch { group_id: Some(Some(elsewhere.id)), ..Default::default() },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn groups_are_listed_per_project_in_the_order_they_were_made() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        create_task_group(&conn, project.id, "Sprint 12").unwrap();
+        create_task_group(&conn, project.id, "Later").unwrap();
+        let names: Vec<String> = list_task_groups(&conn, project.id)
+            .unwrap()
+            .into_iter()
+            .map(|group| group.name)
+            .collect();
+        assert_eq!(names, vec!["Sprint 12", "Later"]);
+    }
+
+    #[test]
     fn a_fresh_database_starts_with_task_and_bug() {
         let conn = memory_db();
         let labels: Vec<String> = list_categories(&conn)
@@ -1461,11 +2062,10 @@ mod tests {
     }
 
     #[test]
-    fn a_new_task_lands_on_today_unless_a_day_is_given() {
+    fn a_task_with_no_day_given_waits_without_one() {
         let conn = memory_db();
         let project = a_project(&conn);
-        let today = today(&conn).unwrap();
-        assert_eq!(a_task(&conn, project.id, "Now").planned_for, today);
+        assert_eq!(a_task(&conn, project.id, "Someday").planned_for, None);
 
         let planned = create_task(
             &conn,
@@ -1477,11 +2077,11 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(planned.planned_for, "2030-01-02");
+        assert_eq!(planned.planned_for.as_deref(), Some("2030-01-02"));
     }
 
     #[test]
-    fn a_day_that_is_not_a_date_falls_back_rather_than_being_stored() {
+    fn a_day_that_is_not_a_date_leaves_the_task_undated() {
         let conn = memory_db();
         let project = a_project(&conn);
         let task = create_task(
@@ -1494,24 +2094,69 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(task.planned_for, today(&conn).unwrap());
+        assert_eq!(task.planned_for, None);
     }
 
     #[test]
-    fn a_task_can_be_moved_to_another_day() {
+    fn a_task_can_be_scheduled_moved_and_taken_off_its_day_again() {
         let conn = memory_db();
         let project = a_project(&conn);
         let task = a_task(&conn, project.id, "Move me");
+        assert_eq!(task.planned_for, None);
+
+        let scheduled = update_task(
+            &conn,
+            task.id,
+            &TaskPatch {
+                planned_for: Some(Some("2030-03-04".into())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(scheduled.planned_for.as_deref(), Some("2030-03-04"));
+
         let moved = update_task(
             &conn,
             task.id,
             &TaskPatch {
+                planned_for: Some(Some("2030-03-05".into())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(moved.planned_for.as_deref(), Some("2030-03-05"));
+
+        // Back into the plan: the work is still there, it just has no day.
+        let unscheduled = update_task(
+            &conn,
+            task.id,
+            &TaskPatch { planned_for: Some(None), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(unscheduled.planned_for, None);
+    }
+
+    #[test]
+    fn a_patch_that_says_nothing_about_the_day_leaves_it_alone() {
+        let conn = memory_db();
+        let project = a_project(&conn);
+        let task = create_task(
+            &conn,
+            &NewTask {
+                project_id: project.id,
+                title: "Scheduled".into(),
                 planned_for: Some("2030-03-04".into()),
                 ..Default::default()
             },
         )
         .unwrap();
-        assert_eq!(moved.planned_for, "2030-03-04");
+        let renamed = update_task(
+            &conn,
+            task.id,
+            &TaskPatch { title: Some("Still scheduled".into()), ..Default::default() },
+        )
+        .unwrap();
+        assert_eq!(renamed.planned_for.as_deref(), Some("2030-03-04"));
     }
 
     #[test]

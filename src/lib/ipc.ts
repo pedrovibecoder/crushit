@@ -25,6 +25,9 @@ import type {
   ShortcutInfo,
   SlackAccount,
   Task,
+  TaskGroup,
+  Tag,
+  TagPatch,
   TaskPatch,
 } from "../types";
 
@@ -84,6 +87,33 @@ export const ipc = {
 
   performanceStats: () => invoke<Stats>("performance_stats"),
 
+  /** Hands the picked tasks to the desktop window and opens it there. */
+  openContextWindow: (taskIds: number[]) =>
+    invoke<void>("open_context_window", { taskIds }),
+  contextSelection: () => invoke<number[]>("context_selection"),
+  briefTasks: (projectId: number, context: string) =>
+    invoke<string>("brief_tasks", { projectId, context }),
+
+  listTags: () => invoke<Tag[]>("list_tags"),
+  createTag: (label: string, color: string) =>
+    invoke<Tag[]>("create_tag", { label, color }),
+  updateTag: (tagId: number, patch: TagPatch) =>
+    invoke<Tag[]>("update_tag", { tagId, patch }),
+  deleteTag: (tagId: number) => invoke<Tag[]>("delete_tag", { tagId }),
+  reorderTags: (orderedIds: number[]) =>
+    invoke<Tag[]>("reorder_tags", { orderedIds }),
+
+  listTaskGroups: (projectId: number) =>
+    invoke<TaskGroup[]>("list_task_groups", { projectId }),
+  createTaskGroup: (projectId: number, name: string) =>
+    invoke<TaskGroup[]>("create_task_group", { projectId, name }),
+  renameTaskGroup: (groupId: number, name: string) =>
+    invoke<TaskGroup[]>("rename_task_group", { groupId, name }),
+  deleteTaskGroup: (groupId: number) =>
+    invoke<TaskGroup[]>("delete_task_group", { groupId }),
+  reorderTaskGroups: (projectId: number, orderedIds: number[]) =>
+    invoke<TaskGroup[]>("reorder_task_groups", { projectId, orderedIds }),
+
   getSettings: () => invoke<Settings>("get_settings"),
   updateSettings: (patch: SettingsPatch) =>
     invoke<Settings>("update_settings", { patch }),
@@ -134,6 +164,8 @@ export const ipc = {
 
   hidePopup: () => invoke<void>("hide_popup"),
   openDesktopWindow: (view?: string) => invoke<void>("open_desktop_window", { view }),
+  /** Where this window was asked to go before it had finished starting up. */
+  takePendingView: () => invoke<string | null>("take_pending_view"),
   hideDesktopWindow: () => invoke<void>("hide_desktop_window"),
   resizePopup: (height: number) => invoke<void>("resize_popup", { height }),
   quitApp: () => invoke<void>("quit_app"),

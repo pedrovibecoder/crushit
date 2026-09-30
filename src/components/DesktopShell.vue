@@ -25,6 +25,7 @@ const agentName = computed(() => AGENT_LABELS[agents.selected]);
 /** The screens the sidebar navigates between, with a count where one helps. */
 const NAV: Array<{ id: View; label: string; icon: string }> = [
   { id: "today", label: "Today", icon: "check" },
+  { id: "plan", label: "Plan", icon: "stack" },
   { id: "goal", label: "Goal", icon: "sparkle" },
   { id: "changes", label: "Changes", icon: "branch" },
   { id: "history", label: "History", icon: "calendar" },

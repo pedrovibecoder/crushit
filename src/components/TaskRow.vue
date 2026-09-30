@@ -4,6 +4,7 @@ import { formatClock, formatDuration } from "../lib/format";
 import type { Task } from "../types";
 import AppIcon from "./AppIcon.vue";
 import CategoryPill from "./CategoryPill.vue";
+import TagChip from "./TagChip.vue";
 
 const props = defineProps<{
   task: Task;
@@ -14,12 +15,22 @@ const props = defineProps<{
   deleting?: boolean;
   /** True when the task was planned for an earlier day and is still open. */
   carriedOver?: boolean;
+  /** While the list is being picked over, a row selects instead of opening. */
+  selecting?: boolean;
+  selected?: boolean;
 }>();
 
 const emit = defineEmits<{
   (event: "open"): void;
   (event: "toggle"): void;
+  (event: "select"): void;
 }>();
+
+/** One click, two meanings, depending on what the list is being used for. */
+function press() {
+  if (props.selecting) emit("select");
+  else emit("open");
+}
 
 const isDone = computed(() => props.task.status === "completed");
 const metCriteria = computed(
@@ -38,27 +49,39 @@ const trailing = computed(() => {
   <div
     class="card flex cursor-pointer items-start gap-2.5 px-2.5 py-2.5 transition-colors"
     :class="[
-      focused ? 'border-accent/45 bg-accent-soft/50' : 'hover:bg-line-soft/70',
+      selected
+        ? 'border-accent/60 bg-accent-soft/60'
+        : focused
+          ? 'border-accent/45 bg-accent-soft/50'
+          : 'hover:bg-line-soft/70',
       deleting && 'row-deleting',
     ]"
     role="button"
     tabindex="0"
-    @click="emit('open')"
-    @keydown.enter.prevent="emit('open')"
-    @keydown.space.prevent="emit('open')"
+    :aria-pressed="selecting ? selected : undefined"
+    @click="press"
+    @keydown.enter.prevent="press"
+    @keydown.space.prevent="press"
   >
+    <!-- The same corner does both jobs: finishing a task, or picking it out.
+         Round while selecting, so it does not read as "mark complete". -->
     <button
-      class="mt-[1px] flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[6px] border transition-colors"
-      :class="
-        isDone
-          ? 'border-success bg-success text-white'
-          : 'border-line bg-card hover:border-ink-3'
-      "
-      :title="isDone ? 'Mark as not done' : 'Mark complete'"
-      :aria-label="isDone ? 'Mark as not done' : 'Mark complete'"
-      @click.stop="emit('toggle')"
+      class="mt-[1px] flex h-[18px] w-[18px] shrink-0 items-center justify-center border transition-colors"
+      :class="[
+        selecting ? 'rounded-full' : 'rounded-[6px]',
+        selecting
+          ? selected
+            ? 'border-accent bg-accent text-white'
+            : 'border-line bg-card hover:border-accent'
+          : isDone
+            ? 'border-success bg-success text-white'
+            : 'border-line bg-card hover:border-ink-3',
+      ]"
+      :title="selecting ? (selected ? 'Leave it out' : 'Pick it out') : isDone ? 'Mark as not done' : 'Mark complete'"
+      :aria-label="selecting ? (selected ? 'Leave it out' : 'Pick it out') : isDone ? 'Mark as not done' : 'Mark complete'"
+      @click.stop="selecting ? emit('select') : emit('toggle')"
     >
-      <AppIcon v-if="isDone" name="check" :size="11" :weight="2.4" />
+      <AppIcon v-if="selecting ? selected : isDone" name="check" :size="11" :weight="2.4" />
     </button>
 
     <div class="min-w-0 flex-1">
@@ -70,6 +93,7 @@ const trailing = computed(() => {
       </p>
       <div class="mt-1.5 flex flex-wrap items-center gap-1">
         <CategoryPill :category="task.category" />
+        <TagChip v-for="slug in task.tags" :key="slug" :slug="slug" />
         <span v-if="task.storyPoints" class="chip tnum text-ink-2" title="Story points">
           {{ task.storyPoints }} SP
         </span>

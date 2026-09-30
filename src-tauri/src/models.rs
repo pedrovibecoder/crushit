@@ -63,6 +63,27 @@ pub struct Category {
     pub position: i64,
 }
 
+/// A second axis on a task, beside its category: which part of the work it
+/// touches — FE, BE, Devops. A task can carry several, or none at all.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Tag {
+    pub id: i64,
+    pub slug: String,
+    pub label: String,
+    /// A hex colour, for the chip on a task row.
+    pub color: String,
+    pub position: i64,
+}
+
+/// The slug is never patched, so renaming a tag keeps every task that has it.
+#[derive(Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct TagPatch {
+    pub label: Option<String>,
+    pub color: Option<String>,
+}
+
 /// Absent fields are left unchanged. The slug is never patched: tasks point at
 /// it, so renaming a category keeps every task that used it.
 #[derive(Deserialize, Debug, Default)]
@@ -151,12 +172,27 @@ pub struct AcceptanceCriterion {
     pub position: i64,
 }
 
+/// A named bucket for work that is not happening today. It carries no dates of
+/// its own: the tasks in it keep the day they sit on, so a group is free to
+/// span a week or a quarter without either of them having to agree.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskGroup {
+    pub id: i64,
+    pub project_id: i64,
+    pub name: String,
+    pub position: i64,
+    pub created_at: i64,
+}
+
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Task {
     pub id: i64,
     pub project_id: i64,
     pub goal_id: Option<i64>,
+    /// The group this task is filed under, if any.
+    pub group_id: Option<i64>,
     pub title: String,
     pub description: Option<String>,
     pub category: String,
@@ -165,14 +201,17 @@ pub struct Task {
     pub estimate_minutes: Option<i64>,
     /// Relative size on the Fibonacci scale, when one has been estimated.
     pub story_points: Option<i64>,
-    /// The day this task sits on, as `YYYY-MM-DD` on the local clock.
-    pub planned_for: String,
+    /// The day this task sits on, as `YYYY-MM-DD` on the local clock, or
+    /// nothing at all: planned work waits without a date until it is given one.
+    pub planned_for: Option<String>,
     pub is_ai_generated: bool,
     pub created_at: i64,
     pub updated_at: i64,
     pub completed_at: Option<i64>,
     pub criteria: Vec<AcceptanceCriterion>,
     pub files: Vec<String>,
+    /// Tag slugs, in the order the tags are shown in.
+    pub tags: Vec<String>,
     pub depends_on: Vec<i64>,
     /// Total seconds of focus recorded against this task.
     pub focus_seconds: i64,
@@ -184,17 +223,20 @@ pub struct Task {
 #[serde(rename_all = "camelCase")]
 pub struct NewTask {
     pub project_id: i64,
+    pub group_id: Option<i64>,
     pub title: String,
     pub description: Option<String>,
     pub category: Option<String>,
     pub status: Option<TaskStatus>,
     pub estimate_minutes: Option<i64>,
     pub story_points: Option<i64>,
+    /// Absent leaves the task undated — planned, but not yet on a day.
     pub planned_for: Option<String>,
     pub goal_id: Option<i64>,
     pub is_ai_generated: Option<bool>,
     pub criteria: Option<Vec<String>>,
     pub files: Option<Vec<String>>,
+    pub tags: Option<Vec<String>>,
 }
 
 /// One finished task, as the history graph needs it: enough to draw a day and
@@ -215,14 +257,19 @@ pub struct CompletedTask {
 #[serde(rename_all = "camelCase")]
 pub struct TaskPatch {
     pub title: Option<String>,
+    /// `Some(None)` takes the task out of its group; absent leaves it alone.
+    pub group_id: Option<Option<i64>>,
     pub description: Option<String>,
     pub category: Option<String>,
     pub status: Option<TaskStatus>,
     pub estimate_minutes: Option<i64>,
     pub story_points: Option<i64>,
-    pub planned_for: Option<String>,
+    /// `Some(None)` takes the task off its day; absent leaves it where it is.
+    pub planned_for: Option<Option<String>>,
     pub criteria: Option<Vec<String>>,
     pub files: Option<Vec<String>>,
+    /// The full set of tags the task should have, as slugs.
+    pub tags: Option<Vec<String>>,
     pub depends_on: Option<Vec<i64>>,
 }
 

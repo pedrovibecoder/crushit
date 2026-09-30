@@ -15,6 +15,8 @@ import GoalView from "./views/GoalView.vue";
 import OnboardingView from "./views/OnboardingView.vue";
 import ProjectsView from "./views/ProjectsView.vue";
 import SettingsView from "./views/SettingsView.vue";
+import ContextView from "./views/ContextView.vue";
+import PlanView from "./views/PlanView.vue";
 import TaskView from "./views/TaskView.vue";
 import TodayView from "./views/TodayView.vue";
 
@@ -39,6 +41,8 @@ app.isDesktop = isDesktop.value;
 
 const VIEWS = {
   today: TodayView,
+  plan: PlanView,
+  context: ContextView,
   task: TaskView,
   projects: ProjectsView,
   goal: GoalView,
@@ -125,12 +129,9 @@ watch(
 );
 
 onMounted(async () => {
-  await app.bootstrap();
-  teardown.push(await app.subscribe());
-
-  window.addEventListener("keydown", onKeydown);
-  teardown.push(() => window.removeEventListener("keydown", onKeydown));
-
+  // Listening starts before the data does: a window opened at a particular
+  // screen is told where to go the moment it appears, which is well before
+  // there is anything to show there.
   try {
     const { listen } = await import("@tauri-apps/api/event");
     teardown.push(
@@ -140,6 +141,25 @@ onMounted(async () => {
     );
   } catch {
     // Only the desktop window is ever sent anywhere.
+  }
+
+  await app.bootstrap();
+  teardown.push(await app.subscribe());
+
+  window.addEventListener("keydown", onKeydown);
+  teardown.push(() => window.removeEventListener("keydown", onKeydown));
+
+  // A window that was closed starts its webview only when it is shown, so the
+  // event above can have been sent before anything existed to hear it — and
+  // bootstrap has just decided which screen to open on regardless. Asking
+  // settles both.
+  if (isDesktop.value) {
+    try {
+      const pending = await ipc.takePendingView();
+      if (pending && pending in VIEWS) app.go(pending as View);
+    } catch {
+      // Nowhere to be sent; stay where bootstrap left us.
+    }
   }
 
   try {

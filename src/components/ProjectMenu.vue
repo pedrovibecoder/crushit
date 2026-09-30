@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
 import AppIcon from "./AppIcon.vue";
+import { onPressOutside } from "../lib/dismiss";
 import { shortenPath } from "../lib/format";
 import type { Project } from "../types";
 
@@ -19,6 +20,8 @@ const emit = defineEmits<{
 /** Takes focus on open so Escape closes it without a click first. */
 const root = ref<HTMLElement | null>(null);
 onMounted(() => root.value?.focus());
+
+onPressOutside(root, () => emit("close"));
 </script>
 
 <template>

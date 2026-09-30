@@ -1,6 +1,7 @@
 pub mod agent;
 mod analysis;
 pub mod block;
+pub mod brief;
 pub mod claude;
 pub mod codex;
 mod commands;
@@ -82,6 +83,20 @@ pub fn run() {
             commands::set_active_project,
             commands::remove_project,
             commands::refresh_project,
+            commands::list_task_groups,
+            commands::create_task_group,
+            commands::rename_task_group,
+            commands::delete_task_group,
+            commands::reorder_task_groups,
+            commands::open_context_window,
+            commands::take_pending_view,
+            commands::context_selection,
+            commands::brief_tasks,
+            commands::list_tags,
+            commands::create_tag,
+            commands::update_tag,
+            commands::delete_tag,
+            commands::reorder_tags,
             commands::list_categories,
             commands::create_category,
             commands::update_category,
@@ -163,6 +178,8 @@ pub fn run() {
             app.manage(ExecutionState::default());
             app.manage(VerificationState::default());
             app.manage(block::BlockState::default());
+            app.manage(commands::ContextState::default());
+            app.manage(commands::PendingView::default());
 
             build_tray(app.handle())?;
             shortcut::register(app.handle());

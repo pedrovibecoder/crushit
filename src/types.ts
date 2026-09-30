@@ -13,6 +13,25 @@ export interface Category {
   position: number;
 }
 
+/**
+ * A second axis on a task, beside its category: which part of the work it
+ * touches — FE, BE, Devops. A task can carry several, or none.
+ */
+export interface Tag {
+  id: number;
+  slug: string;
+  label: string;
+  /** Hex colour for the chip on a task row. */
+  color: string;
+  position: number;
+}
+
+/** The slug is never patched, so renaming keeps every task that has the tag. */
+export interface TagPatch {
+  label?: string;
+  color?: string;
+}
+
 export interface CategoryPatch {
   label?: string;
   color?: string;
@@ -56,10 +75,31 @@ export interface AcceptanceCriterion {
   position: number;
 }
 
+/** What a day holds, as the calendar grid needs it: how much, and how far. */
+export interface DayMark {
+  total: number;
+  done: number;
+}
+
+/**
+ * A named bucket for work that is not happening today. It carries no dates of
+ * its own: a task in a group keeps the day it sits on, so a group is free to
+ * span a week or a quarter.
+ */
+export interface TaskGroup {
+  id: number;
+  projectId: number;
+  name: string;
+  position: number;
+  createdAt: number;
+}
+
 export interface Task {
   id: number;
   projectId: number;
   goalId: number | null;
+  /** The group this task is filed under, if any. */
+  groupId: number | null;
   title: string;
   description: string | null;
   category: TaskCategory;
@@ -68,14 +108,19 @@ export interface Task {
   estimateMinutes: number | null;
   /** Relative size on the Fibonacci scale, when one has been estimated. */
   storyPoints: number | null;
-  /** The day this task sits on, as `YYYY-MM-DD` on the local clock. */
-  plannedFor: string;
+  /**
+   * The day this task sits on, as `YYYY-MM-DD` on the local clock, or `null`:
+   * planned work waits without a date until it is given one.
+   */
+  plannedFor: string | null;
   isAiGenerated: boolean;
   createdAt: number;
   updatedAt: number;
   completedAt: number | null;
   criteria: AcceptanceCriterion[];
   files: string[];
+  /** Tag slugs, in the order the tags themselves are shown in. */
+  tags: string[];
   dependsOn: number[];
   focusSeconds: number;
   focusSessions: number;
@@ -92,27 +137,35 @@ export interface CompletedTask {
 
 export interface NewTask {
   projectId: number;
+  groupId?: number | null;
   title: string;
   description?: string | null;
   category?: TaskCategory;
   status?: TaskStatus;
   estimateMinutes?: number | null;
   storyPoints?: number | null;
-  plannedFor?: string;
+  /** Absent leaves the task undated — planned, but not yet on a day. */
+  plannedFor?: string | null;
   criteria?: string[];
   files?: string[];
+  tags?: string[];
 }
 
 export interface TaskPatch {
   title?: string;
+  /** `null` takes the task out of its group; absent leaves it where it is. */
+  groupId?: number | null;
   description?: string;
   category?: TaskCategory;
   status?: TaskStatus;
   estimateMinutes?: number;
   storyPoints?: number;
-  plannedFor?: string;
+  /** `null` takes the task off its day; absent leaves it where it is. */
+  plannedFor?: string | null;
   criteria?: string[];
   files?: string[];
+  /** The full set of tags the task should have, as slugs. */
+  tags?: string[];
   dependsOn?: number[];
 }
 
@@ -180,6 +233,16 @@ export interface Settings {
   /** The sites that are shut during a session, as bare hosts. */
   focusBlockSites: string[];
   onboarded: boolean;
+}
+
+/**
+ * One thing the agent did while writing a brief — a file read, a search — as
+ * it happens. `label` comes with the step and is absent when it finishes.
+ */
+export interface BriefStep {
+  id: string;
+  label?: string;
+  done: boolean;
 }
 
 /** Whether macOS lets the app ask a browser what it is showing. */
@@ -384,7 +447,9 @@ export interface Bootstrap {
   projects: Project[];
   activeProject: Project | null;
   tasks: Task[];
+  taskGroups: TaskGroup[];
   categories: Category[];
+  tags: Tag[];
   focus: FocusSnapshot;
   rest: RestSnapshot;
   analysis: AnalysisSnapshot;

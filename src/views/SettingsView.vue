@@ -11,6 +11,7 @@ import { shortenPath } from "../lib/format";
 import { useAgentStore } from "../stores/agent";
 import { useAppStore } from "../stores/app";
 import { useCategoriesStore } from "../stores/categories";
+import { useTagsStore } from "../stores/tags";
 import { useSlackStore } from "../stores/slack";
 import {
   AGENTS,
@@ -27,6 +28,7 @@ import {
 const app = useAppStore();
 const agents = useAgentStore();
 const categories = useCategoriesStore();
+const tags = useTagsStore();
 const slack = useSlackStore();
 
 const FOCUS_PRESETS = [15, 25, 45, 60];
@@ -125,6 +127,37 @@ async function chooseModel(value: string) {
   await app.updateSettings(
     selected.value === "codex" ? { codexModel: model } : { claudeModel: model },
   );
+}
+
+const newTag = ref("");
+/** Which tag row has its palette open. */
+const recolouringTag = ref<number | null>(null);
+
+const nextTagColor = computed(
+  () => CATEGORY_COLORS[tags.tags.length % CATEGORY_COLORS.length],
+);
+
+async function addTag() {
+  const label = newTag.value.trim();
+  if (!label) return;
+  if (await tags.create(label, nextTagColor.value)) newTag.value = "";
+}
+
+async function renameTag(id: number, event: Event) {
+  const input = event.target as HTMLInputElement;
+  const label = input.value.trim();
+  const current = tags.tags.find((tag) => tag.id === id);
+  if (!current) return;
+  if (!label || label === current.label) {
+    input.value = current.label;
+    return;
+  }
+  await tags.update(id, { label });
+}
+
+async function recolourTag(id: number, color: string) {
+  recolouringTag.value = null;
+  await tags.update(id, { color });
 }
 
 const newCategory = ref("");
@@ -354,6 +387,77 @@ async function reveal() {
         <p v-if="categories.error" class="mt-1.5 text-[11px] text-danger">
           {{ categories.error }}
         </p>
+      </section>
+
+      <section class="mt-4">
+        <h2 class="eyebrow">Tags</h2>
+        <p class="mt-1 text-[11px] leading-relaxed text-ink-2">
+          Which part of the work a task touches. A task can carry several, or none.
+        </p>
+
+        <ul class="mt-1.5 space-y-1">
+          <li v-for="tag in tags.tags" :key="tag.id" class="card px-2 py-1.5">
+            <div class="flex items-center gap-2">
+              <button
+                class="h-[18px] w-[18px] shrink-0 rounded-full border border-line"
+                :style="{ backgroundColor: tag.color }"
+                :aria-label="`Change the colour of ${tag.label}`"
+                :title="`Change the colour of ${tag.label}`"
+                @click="recolouringTag = recolouringTag === tag.id ? null : tag.id"
+              />
+              <input
+                :value="tag.label"
+                class="min-w-0 flex-1 rounded-[6px] border border-transparent bg-transparent px-1 py-0.5 text-[12.5px] font-semibold outline-none hover:border-line focus:border-ink-3"
+                :aria-label="`Rename ${tag.label}`"
+                @blur="renameTag(tag.id, $event)"
+                @keydown.enter.prevent="($event.target as HTMLInputElement).blur()"
+              />
+              <button
+                class="shrink-0 text-ink-3 transition-colors hover:text-danger"
+                :aria-label="`Delete ${tag.label}`"
+                :title="`Delete ${tag.label} — the tasks that carry it keep everything else`"
+                @click="tags.remove(tag.id)"
+              >
+                <AppIcon name="close" :size="12" />
+              </button>
+            </div>
+
+            <div v-if="recolouringTag === tag.id" class="mt-1.5 flex flex-wrap gap-1 pl-[26px]">
+              <button
+                v-for="color in CATEGORY_COLORS"
+                :key="color"
+                class="h-[18px] w-[18px] rounded-full border transition-transform hover:scale-110"
+                :class="color === tag.color ? 'border-ink' : 'border-line'"
+                :style="{ backgroundColor: color }"
+                :aria-label="`Use this colour for ${tag.label}`"
+                @click="recolourTag(tag.id, color)"
+              />
+            </div>
+          </li>
+        </ul>
+
+        <div class="mt-1.5 flex gap-1.5">
+          <span
+            class="mt-[7px] h-[18px] w-[18px] shrink-0 rounded-full border border-line"
+            :style="{ backgroundColor: nextTagColor }"
+          />
+          <input
+            v-model="newTag"
+            type="text"
+            placeholder="Add a tag…"
+            aria-label="New tag name"
+            class="field min-w-0 flex-1 px-2 py-1.5 text-[11.5px]"
+            @keydown.enter.prevent="addTag"
+          />
+          <button
+            class="btn btn-dark shrink-0 px-2.5 py-1.5 text-[11.5px]"
+            :disabled="!newTag.trim()"
+            @click="addTag"
+          >
+            Add
+          </button>
+        </div>
+        <p v-if="tags.error" class="mt-1.5 text-[11px] text-danger">{{ tags.error }}</p>
       </section>
 
       <section class="mt-4">

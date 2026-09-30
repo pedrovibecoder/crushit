@@ -3,16 +3,17 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import AppIcon from "../components/AppIcon.vue";
-import DayPicker, { type DayMark } from "../components/DayPicker.vue";
+import DayPicker from "../components/DayPicker.vue";
 import NewTaskForm from "../components/NewTaskForm.vue";
 import PanelHeader from "../components/PanelHeader.vue";
+import TagFilter from "../components/TagFilter.vue";
 import ProjectMenu from "../components/ProjectMenu.vue";
 import SleepingFigure from "../components/SleepingFigure.vue";
 import ProgressBar from "../components/ProgressBar.vue";
 import StatsCards from "../components/StatsCards.vue";
 import TaskRow from "../components/TaskRow.vue";
-import { dayName, formatClock, localDay, shiftDay } from "../lib/format";
-import { ipc } from "../lib/ipc";
+import { byTitle, dayName, formatClock, localDay, shiftDay } from "../lib/format";
+import { errorMessage, ipc } from "../lib/ipc";
 import { useAppStore } from "../stores/app";
 import { useAgentStore } from "../stores/agent";
 import { useExecutionStore } from "../stores/execution";
@@ -71,42 +72,12 @@ watch(projectsOpen, (open) => { if (open) pickerOpen.value = false });
 
 const panelOpen = computed(() => pickerOpen.value || projectsOpen.value);
 
-function closePanels() {
-  pickerOpen.value = false;
-  projectsOpen.value = false;
-}
-
 async function switchProject(projectId: number) {
   projectsOpen.value = false;
   await app.selectProject(projectId);
   // The new project's work is its own; start it where the list opens.
   day.value = today.value;
 }
-
-/**
- * What each day holds, so the grid can mark the days worth opening. A task
- * counts on the day it was planned for and on the day it was finished, which
- * are usually the same day and occasionally are not. Days it was merely
- * carried through are left unmarked: carry-over would otherwise smear a
- * single unfinished task across every date after it.
- */
-const dayMarks = computed(() => {
-  const marks: Record<string, DayMark> = {};
-  const note = (key: string, done: boolean) => {
-    const mark = (marks[key] ??= { total: 0, done: 0 });
-    mark.total += 1;
-    if (done) mark.done += 1;
-  };
-  for (const task of tasks.tasks) {
-    const done = task.status === "completed";
-    note(task.plannedFor, done);
-    const finished = task.completedAt !== null
-      ? localDay(new Date(task.completedAt * 1000))
-      : null;
-    if (finished && finished !== task.plannedFor) note(finished, done);
-  }
-  return marks;
-});
 
 /** Spelled out, since the title only ever says Today or Yesterday. */
 const fullDate = computed(() =>
@@ -117,9 +88,17 @@ const fullDate = computed(() =>
   }),
 );
 
-/** A task is carried over when its own day is behind the one being read. */
+/**
+ * A task is carried over when its own day is behind the one being read. Work
+ * that has no day at all is not carried over — it is waiting in the plan, and
+ * it appears here only once it has been given a date.
+ */
 function isCarriedOver(task: Task) {
-  return task.plannedFor < day.value && task.status !== "completed";
+  return (
+    task.plannedFor !== null &&
+    task.plannedFor < day.value &&
+    task.status !== "completed"
+  );
 }
 
 /** Everything that belongs on the day being shown. */
@@ -158,7 +137,12 @@ const FILTERS: Array<{ id: Filter; label: string }> = [
 ];
 const filter = ref<Filter>("all");
 
-/** Focused task first, then open work, then anything already finished. */
+/**
+ * Focused task first, then open work, then anything already finished — and
+ * within each of those, by title. Titles here carry their own structure
+ * (`<Project> [FE] …`), so alphabetical keeps a project's work together
+ * instead of scattering it in the order it happened to be typed.
+ */
 const ordered = computed<Task[]>(() => {
   const rank = (task: Task) => {
     if (focus.isFocused(task.id)) return 0;
@@ -166,12 +150,58 @@ const ordered = computed<Task[]>(() => {
     return 1;
   };
   return [...onThisDay.value].sort(
-    (a, b) => rank(a) - rank(b) || a.position - b.position,
+    (a, b) => rank(a) - rank(b) || byTitle(a, b),
   );
 });
 
+/** One tag at a time, or none: see `TagFilter`. */
+const tagFilter = ref<string | null>(null);
+
+/**
+ * Picking several tasks out of the list to hand to an agent. It is a mode
+ * rather than a permanent column of checkboxes: the list is read far more
+ * often than it is gathered up, and a row of empty boxes on every task would
+ * be there all day for the sake of a thing done now and then.
+ */
+const selecting = ref(false);
+const selected = ref(new Set<number>());
+const contextError = ref<string | null>(null);
+
+function toggleSelected(taskId: number) {
+  const next = new Set(selected.value);
+  if (!next.delete(taskId)) next.add(taskId);
+  selected.value = next;
+}
+
+function stopSelecting() {
+  selecting.value = false;
+  selected.value = new Set();
+  contextError.value = null;
+}
+
+/** In the order the list is showing, not the order they were picked. */
+const selectedTasks = computed(() =>
+  visible.value.filter((task) => selected.value.has(task.id)),
+);
+
+/**
+ * The brief opens in the desktop window rather than here. A menu-bar popup is
+ * 360 points wide: enough to say what today is, not enough to read a page of
+ * prose about what a handful of tasks amount to.
+ */
+async function openContext() {
+  contextError.value = null;
+  try {
+    await ipc.openContextWindow(selectedTasks.value.map((task) => task.id));
+    stopSelecting();
+  } catch (caught) {
+    contextError.value = errorMessage(caught);
+  }
+}
+
 const visible = computed(() =>
   ordered.value.filter((task) => {
+    if (tagFilter.value !== null && !task.tags.includes(tagFilter.value)) return false;
     if (filter.value === "open") return task.status !== "completed";
     if (filter.value === "done") return task.status === "completed";
     return true;
@@ -457,6 +487,7 @@ onBeforeUnmount(() => stopDrops?.());
           :class="projectsOpen && 'bg-line-soft'"
           :aria-expanded="projectsOpen"
           title="Switch project"
+          @pointerdown.stop
           @click="projectsOpen = !projectsOpen"
         >
           <span class="truncate text-[11px] leading-tight font-semibold text-accent">
@@ -495,9 +526,6 @@ onBeforeUnmount(() => stopDrops?.());
       </template>
     </PanelHeader>
 
-    <!-- Anywhere else closes the panel, the way a menu behaves. -->
-    <div v-if="panelOpen" class="absolute inset-0 z-10" @click="closePanels" />
-
     <!-- Zero height in the flow: it only marks where the panel hangs from. -->
     <div v-if="projectsOpen" class="relative z-10">
       <ProjectMenu
@@ -526,7 +554,8 @@ onBeforeUnmount(() => stopDrops?.());
         :class="pickerOpen && 'bg-line-soft'"
         :aria-expanded="pickerOpen"
         title="Pick a day"
-        @click="pickerOpen = !pickerOpen"
+        @pointerdown.stop
+          @click="pickerOpen = !pickerOpen"
       >
         <AppIcon
           name="calendar"
@@ -556,7 +585,7 @@ onBeforeUnmount(() => stopDrops?.());
         v-model="day"
         class="absolute inset-x-3.5 top-0 shadow-[var(--raised)]"
         :today="today"
-        :marks="dayMarks"
+        :marks="tasks.dayMarks"
         @close="pickerOpen = false"
       />
     </div>
@@ -743,6 +772,19 @@ onBeforeUnmount(() => stopDrops?.());
           {{ option.label }}
         </button>
       </div>
+      <div class="mt-1.5 flex items-center gap-2">
+        <TagFilter v-model="tagFilter" class="min-w-0 flex-1" />
+        <button
+          class="chip shrink-0 font-semibold transition-colors"
+          :class="selecting ? 'border-accent/45 bg-accent-soft text-accent' : 'text-ink-2 hover:bg-line-soft'"
+          :aria-pressed="selecting"
+          :title="selecting ? 'Stop picking tasks out' : 'Pick tasks out to hand to an agent'"
+          @click="selecting ? stopSelecting() : (selecting = true)"
+        >
+          <AppIcon name="sparkle" :size="10" :filled="selecting" />
+          {{ selecting ? "Done" : "Select" }}
+        </button>
+      </div>
     </div>
 
     <div class="space-y-1.5 panel-scroll px-3.5 pb-3">
@@ -762,8 +804,11 @@ onBeforeUnmount(() => stopDrops?.());
           :blocked-by="tasks.blockedBy(task)"
           :deleting="tasks.deletingId === task.id"
           :carried-over="isCarriedOver(task)"
+          :selecting="selecting"
+          :selected="selected.has(task.id)"
           @open="app.openTask(task.id)"
           @toggle="tasks.toggleComplete(task)"
+          @select="toggleSelected(task.id)"
         />
       </TransitionGroup>
 
@@ -788,9 +833,44 @@ onBeforeUnmount(() => stopDrops?.());
       {{ dropError }}
     </p>
 
+    <!-- What was gathered up, and what can be done with it. Sits above the
+         footer so the list keeps its own actions where they always are. -->
+    <div v-if="selecting" class="border-t border-line px-3.5 py-2.5">
+      <div class="flex items-center gap-2">
+        <p class="min-w-0 flex-1 text-[11.5px] font-medium text-ink-2">
+          <span class="tnum font-semibold text-ink">{{ selected.size }}</span>
+          {{ selected.size === 1 ? "task" : "tasks" }} picked
+        </p>
+        <button
+          class="btn btn-ghost shrink-0 px-2.5 py-1.5 text-[11.5px]"
+          :disabled="!selected.size"
+          @click="selected = new Set(visible.map((task) => task.id))"
+        >
+          All
+        </button>
+        <button
+          class="btn btn-dark shrink-0 px-3 py-1.5 text-[11.5px]"
+          :disabled="!selected.size"
+          title="Open these in a window and ask the agent what they add up to"
+          @click="openContext"
+        >
+          <AppIcon name="sparkle" :size="11" filled />Context
+        </button>
+      </div>
+      <p v-if="contextError" class="mt-1.5 text-[11px] text-danger">{{ contextError }}</p>
+    </div>
+
     <footer class="flex items-center gap-2 border-t border-line px-3.5 py-2.5">
       <button class="btn btn-ghost flex-1 py-2 text-[12px]" @click="app.go('goal')">
         <AppIcon name="sparkle" :size="13" filled />New goal
+      </button>
+      <button
+        class="btn btn-ghost px-2.5 py-2"
+        title="Plan work for later"
+        aria-label="Plan work for later"
+        @click="app.go('plan')"
+      >
+        <AppIcon name="stack" :size="13" />
       </button>
       <button
         class="btn btn-ghost px-2.5 py-2"

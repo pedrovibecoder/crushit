@@ -26,7 +26,9 @@ pub struct Bootstrap {
     pub projects: Vec<Project>,
     pub active_project: Option<Project>,
     pub tasks: Vec<Task>,
+    pub task_groups: Vec<TaskGroup>,
     pub categories: Vec<Category>,
+    pub tags: Vec<Tag>,
     pub focus: FocusSnapshot,
     pub rest: RestSnapshot,
     pub analysis: AnalysisSnapshot,
@@ -72,6 +74,10 @@ pub fn bootstrap(
         ),
         None => (Vec::new(), None),
     };
+    let task_groups = match &active_project {
+        Some(project) => db::list_task_groups(&conn, project.id)?,
+        None => Vec::new(),
+    };
     Ok(Bootstrap {
         verification: verification.snapshot(),
         execution: execution.snapshot(),
@@ -81,7 +87,9 @@ pub fn bootstrap(
         projects,
         active_project,
         tasks,
+        task_groups,
         categories: db::list_categories(&conn)?,
+        tags: db::list_tags(&conn)?,
         focus: focus_state.timer().snapshot(),
         rest: rest.snapshot(),
     })
@@ -219,6 +227,125 @@ pub fn refresh_project(db: State<'_, Db>, project_id: i64) -> Result<Project> {
         repo::is_git_repo(path),
         repo::current_branch(path).as_deref(),
     )
+}
+
+// ------------------------------------------------------------- task groups
+
+#[tauri::command]
+pub fn list_task_groups(db: State<'_, Db>, project_id: i64) -> Result<Vec<TaskGroup>> {
+    db::list_task_groups(&db.conn(), project_id)
+}
+
+#[tauri::command]
+pub fn create_task_group(
+    db: State<'_, Db>,
+    project_id: i64,
+    name: String,
+) -> Result<Vec<TaskGroup>> {
+    let conn = db.conn();
+    db::create_task_group(&conn, project_id, &name)?;
+    db::list_task_groups(&conn, project_id)
+}
+
+#[tauri::command]
+pub fn rename_task_group(
+    db: State<'_, Db>,
+    group_id: i64,
+    name: String,
+) -> Result<Vec<TaskGroup>> {
+    let conn = db.conn();
+    let group = db::rename_task_group(&conn, group_id, &name)?;
+    db::list_task_groups(&conn, group.project_id)
+}
+
+/// The tasks inside come out of the group rather than going with it, so the
+/// interface has to re-read them.
+#[tauri::command]
+pub fn delete_task_group(
+    app: AppHandle,
+    db: State<'_, Db>,
+    group_id: i64,
+) -> Result<Vec<TaskGroup>> {
+    let conn = db.conn();
+    let group = db::get_task_group(&conn, group_id)?;
+    db::delete_task_group(&conn, group_id)?;
+    let groups = db::list_task_groups(&conn, group.project_id)?;
+    drop(conn);
+    notify_tasks_changed(&app);
+    Ok(groups)
+}
+
+#[tauri::command]
+pub fn reorder_task_groups(
+    db: State<'_, Db>,
+    project_id: i64,
+    ordered_ids: Vec<i64>,
+) -> Result<Vec<TaskGroup>> {
+    let conn = db.conn();
+    db::reorder_task_groups(&conn, project_id, &ordered_ids)?;
+    db::list_task_groups(&conn, project_id)
+}
+
+// --------------------------------------------------------------------- tags
+
+fn notify_tags_changed(app: &AppHandle) {
+    let _ = app.emit("tags:changed", ());
+}
+
+#[tauri::command]
+pub fn list_tags(db: State<'_, Db>) -> Result<Vec<Tag>> {
+    db::list_tags(&db.conn())
+}
+
+#[tauri::command]
+pub fn create_tag(
+    app: AppHandle,
+    db: State<'_, Db>,
+    label: String,
+    color: String,
+) -> Result<Vec<Tag>> {
+    let conn = db.conn();
+    db::create_tag(&conn, &label, &color)?;
+    let tags = db::list_tags(&conn)?;
+    drop(conn);
+    notify_tags_changed(&app);
+    Ok(tags)
+}
+
+#[tauri::command]
+pub fn update_tag(
+    app: AppHandle,
+    db: State<'_, Db>,
+    tag_id: i64,
+    patch: TagPatch,
+) -> Result<Vec<Tag>> {
+    let conn = db.conn();
+    db::update_tag(&conn, tag_id, &patch)?;
+    let tags = db::list_tags(&conn)?;
+    drop(conn);
+    notify_tags_changed(&app);
+    Ok(tags)
+}
+
+/// The tasks that carried the tag keep everything else about themselves; they
+/// simply stop carrying it, so the task list has to be re-read.
+#[tauri::command]
+pub fn delete_tag(app: AppHandle, db: State<'_, Db>, tag_id: i64) -> Result<Vec<Tag>> {
+    let conn = db.conn();
+    let tags = db::delete_tag(&conn, tag_id)?;
+    drop(conn);
+    notify_tags_changed(&app);
+    notify_tasks_changed(&app);
+    Ok(tags)
+}
+
+#[tauri::command]
+pub fn reorder_tags(app: AppHandle, db: State<'_, Db>, ordered_ids: Vec<i64>) -> Result<Vec<Tag>> {
+    let conn = db.conn();
+    let tags = db::reorder_tags(&conn, &ordered_ids)?;
+    drop(conn);
+    notify_tags_changed(&app);
+    Ok(tags)
 }
 
 // --------------------------------------------------------------- categories
@@ -516,8 +643,12 @@ pub fn update_settings(
 /// Asks the browsers one harmless question, to find out whether macOS is
 /// letting the app talk to them at all. The settings screen offers this
 /// because "it is not blocking anything" has two very different causes.
+///
+/// `async` for the same reason as `brief_tasks`: this shells out, and a
+/// synchronous command holds the main thread while it does — long enough to
+/// notice if the system is deciding whether to show a permission dialog.
 #[tauri::command]
-pub fn check_focus_block() -> crate::block::Permission {
+pub async fn check_focus_block() -> crate::block::Permission {
     crate::block::probe()
 }
 
@@ -541,8 +672,31 @@ pub fn hide_popup(app: AppHandle) -> Result<()> {
 }
 
 /// Raises the desktop window — the "open in a real window" action.
+/// Where the desktop window has been asked to go, for it to pick up once it is
+/// running.
+///
+/// The event alone is not enough: a window that was closed starts its webview
+/// when it is shown, so anything emitted at that moment lands before there is
+/// anything listening. The request is left here as well, and the window asks
+/// for it after it has finished starting up.
+#[derive(Default)]
+pub struct PendingView(pub Mutex<Option<String>>);
+
 #[tauri::command]
-pub fn open_desktop_window(app: AppHandle, view: Option<String>) -> Result<()> {
+pub fn take_pending_view(state: State<'_, PendingView>) -> Option<String> {
+    state
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take()
+}
+
+#[tauri::command]
+pub fn open_desktop_window(
+    app: AppHandle,
+    pending: State<'_, PendingView>,
+    view: Option<String>,
+) -> Result<()> {
     // Opening the window is a deliberate switch of surface, so the popup gets
     // out of the way rather than hovering over it.
     let _ = popup::hide(&app);
@@ -550,6 +704,12 @@ pub fn open_desktop_window(app: AppHandle, view: Option<String>) -> Result<()> {
     // The desktop window keeps its own idea of which screen it is on, so being
     // sent somewhere has to be asked for rather than assumed.
     if let Some(view) = view.filter(|view| !view.trim().is_empty()) {
+        *pending
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(view.clone());
+        // For a window that is already up, this arrives at once; for one that
+        // is only now starting, `take_pending_view` is what carries it.
         let _ = app.emit_to(crate::desktop::WINDOW_LABEL, "desktop:navigate", view);
     }
     Ok(())
@@ -918,6 +1078,114 @@ pub fn start_analysis(
 
     spawn_analysis_worker(app, goal.clone(), project.path, chosen, binary, model, request);
     Ok(goal)
+}
+
+/// Which tasks the developer picked out, handed from one window to the other.
+///
+/// The popup and the desktop window are separate webviews with separate state,
+/// so a selection made in one cannot simply be read by the other. It is left
+/// here on the way past instead.
+#[derive(Default)]
+pub struct ContextState(pub Mutex<Vec<i64>>);
+
+/// Opens the picked tasks in the desktop window, where there is room to read
+/// them. A brief is worth a window; it is not worth a menu-bar popup.
+#[tauri::command]
+pub fn open_context_window(
+    app: AppHandle,
+    state: State<'_, ContextState>,
+    pending: State<'_, PendingView>,
+    task_ids: Vec<i64>,
+) -> Result<()> {
+    if task_ids.is_empty() {
+        return Err(Error::invalid("pick a task or two first"));
+    }
+    *state.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = task_ids;
+    open_desktop_window(app, pending, Some("context".to_string()))
+}
+
+#[tauri::command]
+pub fn context_selection(state: State<'_, ContextState>) -> Vec<i64> {
+    state
+        .0
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+/// Asks the agent to read the repository and say what the picked tasks amount
+/// to. One read-only turn, like the acceptance-criteria suggestion.
+///
+/// `async` is not decoration: Tauri runs a synchronous command on the main
+/// thread, so an agent turn declared that way freezes the entire application —
+/// windows, menu bar and all — until it answers.
+#[tauri::command]
+pub async fn brief_tasks(
+    app: AppHandle,
+    db: State<'_, Db>,
+    cache: State<'_, agent::StatusCache>,
+    project_id: i64,
+    context: String,
+) -> Result<String> {
+    if context.trim().is_empty() {
+        return Err(Error::invalid("there is nothing to brief on"));
+    }
+    let (project, chosen, model) = {
+        let conn = db.conn();
+        let settings = db::get_settings(&conn)?;
+        let project = db::find_project(&conn, project_id)?.ok_or(Error::NotFound("project"))?;
+        (
+            project,
+            settings.agent,
+            configured_model(&settings, settings.agent),
+        )
+    };
+    let binary = agent_binary(&db, &cache, chosen)?;
+    let prompt = crate::brief::prompt(&project.name, &context);
+
+    // What the agent is doing, as it does it. The same steps the goal screen
+    // shows for a planning run: a wait with the work visible is a wait; one
+    // with a spinner on it is a hang.
+    let progress = app.clone();
+    let on_event = move |event: crate::plan::AnalysisEvent| {
+        let payload = match event {
+            crate::plan::AnalysisEvent::StepStarted { id, label } => {
+                serde_json::json!({ "id": id, "label": label, "done": false })
+            }
+            crate::plan::AnalysisEvent::StepFinished { id } => {
+                serde_json::json!({ "id": id, "done": true })
+            }
+        };
+        let _ = progress.emit("brief:step", payload);
+    };
+
+    let answer = match chosen {
+        Agent::Codex => {
+            let client = app.state::<CodexClient>();
+            client.ensure_started(&binary, &app.package_info().version.to_string())?;
+            crate::codex::planning::run_read_only_turn(
+                &client,
+                &project.path,
+                &prompt,
+                crate::brief::output_schema(),
+                model.as_deref(),
+                on_event,
+                || false,
+                "Codex took too long to read the repository for this brief.",
+            )
+        }
+        Agent::ClaudeCode => crate::claude::planning::run_read_only(
+            &binary,
+            &project.path,
+            &format!("{prompt}{}", crate::brief::json_instruction()),
+            model.as_deref(),
+            on_event,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            "Claude Code took too long to read the repository for this brief.",
+        ),
+    };
+
+    crate::brief::parse(&answer?.0)
 }
 
 /// Turns a file dropped on the window into a plan waiting to be accepted.
